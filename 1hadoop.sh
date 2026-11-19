@@ -24,6 +24,9 @@ SAMPLES="$LOG_DIR/.${STAGE}_${RUN_TS}.samples"
 # Ask for the sudo password now, so waiting for it is not counted in Duration
 sudo -v
 
+# Run start time (Part 0): the beginning of the whole run
+RUN_START_HMS=$(date '+%H:%M:%S')
+
 # Send all output to screen + log, with a timestamp on every line
 exec > >(while IFS= read -r l; do printf '[%(%Y-%m-%d %H:%M:%S)T] %s\n' -1 "$l"; done | tee -a "$LOG") 2>&1
 
@@ -38,9 +41,10 @@ LAT=$(echo "$PING_OUT" | awk -F'/' '/rtt/{print $5}')
 LOSS=$(echo "$PING_OUT" | grep -oE '[0-9.]+% packet loss' | grep -oE '^[0-9.]+')
 DISK=$(df -BG / | awk 'NR==2{gsub("G","",$4); print $4}')
 P0_CSV="$LOG_DIR/part0.csv"
-[ -f "$P0_CSV" ] || echo "date,time,bandwidth_mbps,latency_ms,packet_loss_pct,free_disk_gb" > "$P0_CSV"
-echo "$(date +%Y-%m-%d),$(date +%H:%M:%S),${BW:-NA},${LAT:-NA},${LOSS:-NA},$DISK" >> "$P0_CSV"
+[ -f "$P0_CSV" ] || echo "date,run_start,bandwidth_mbps,latency_ms,packet_loss_pct,free_disk_gb" > "$P0_CSV"
+echo "$(date +%Y-%m-%d),$RUN_START_HMS,${BW:-NA},${LAT:-NA},${LOSS:-NA},$DISK" >> "$P0_CSV"
 echo "----- Part 0 -----"
+echo "Run start time                         : $RUN_START_HMS"
 echo "Network bandwidth (Mbit/s)             : ${BW:-NA}"
 echo "Network latency (ms) / packet loss (%) : ${LAT:-NA} / ${LOSS:-NA}"
 echo "Free disk before run (GB)              : $DISK"
