@@ -4,7 +4,7 @@
 #
 # PART 0 (runs first): Network bandwidth, latency, packet loss, free disk
 # PART 1 (then S1):    Start, End, Duration (s), Download time (s), Data downloaded (MB),
-#                      Exit code, Attempts, Recovery time (s), Outcome (2/1/0),
+#                      Attempts, Recovery time (s), Outcome (2/1/0),
 #                      Peak CPU (%), Mean CPU (%), Peak RAM (GB), Error / log
 # Outcome: 2 = success on 1st attempt, 1 = success after retry, 0 = failed
 # Success = all 5 Hadoop daemons running (jps), not only exit code 0.
@@ -412,7 +412,7 @@ RX0=$(rx_bytes)
 sampler & SAMPLER_PID=$!
 trap 'kill $SAMPLER_PID 2>/dev/null' EXIT
 
-ATTEMPTS=0; RC=0; PASSED=0; FIRST_FAIL_EPOCH=""
+ATTEMPTS=0; PASSED=0; FIRST_FAIL_EPOCH=""
 while [ "$ATTEMPTS" -lt "$MAX_ATTEMPTS" ]; do
     ATTEMPTS=$((ATTEMPTS+1))
     echo "===== IFADEG $STAGE attempt $ATTEMPTS ====="
@@ -420,12 +420,11 @@ while [ "$ATTEMPTS" -lt "$MAX_ATTEMPTS" ]; do
         stop-all.sh >/dev/null 2>&1     # clean up half-started daemons before retry
     fi
     ( install_s1 )                      # subshell: "cd" and "exit" stay inside
-    RC=$?
     if verify_s1; then
         PASSED=1; echo "[IFADEG] verify PASS (all 5 Hadoop daemons running)"
         break
     fi
-    echo "[IFADEG] verify FAIL (exit code $RC)"
+    echo "[IFADEG] verify FAIL"
     [ -z "$FIRST_FAIL_EPOCH" ] && FIRST_FAIL_EPOCH=$(date +%s)
 done
 
@@ -464,8 +463,8 @@ if [ "$OUTCOME" -ne 2 ]; then
 fi
 
 # Save one row to part1.csv
-[ -f "$CSV" ] || echo "date,stage,start,end,duration_s,download_time_s,data_downloaded_mb,exit_code,attempts,recovery_time_s,outcome,peak_cpu_pct,mean_cpu_pct,peak_ram_gb,error_log" > "$CSV"
-echo "$(date +%Y-%m-%d),$STAGE,$START_HMS,$END_HMS,$DURATION,$DL_TIME,$DATA_MB,$RC,$ATTEMPTS,$RECOVERY,$OUTCOME,$PEAK_CPU,$MEAN_CPU,$PEAK_RAM,\"$ERR_LOG\"" >> "$CSV"
+[ -f "$CSV" ] || echo "date,stage,start,end,duration_s,download_time_s,data_downloaded_mb,attempts,recovery_time_s,outcome,peak_cpu_pct,mean_cpu_pct,peak_ram_gb,error_log" > "$CSV"
+echo "$(date +%Y-%m-%d),$STAGE,$START_HMS,$END_HMS,$DURATION,$DL_TIME,$DATA_MB,$ATTEMPTS,$RECOVERY,$OUTCOME,$PEAK_CPU,$MEAN_CPU,$PEAK_RAM,\"$ERR_LOG\"" >> "$CSV"
 
 echo ""
 echo "----- Part 1: $STAGE (1hadoop.sh) -----"
@@ -473,7 +472,6 @@ echo "Start / End          : $START_HMS / $END_HMS"
 echo "Duration (s)         : $DURATION"
 echo "Download time (s)    : $DL_TIME"
 echo "Data downloaded (MB) : $DATA_MB"
-echo "Exit code            : $RC"
 echo "Attempts             : $ATTEMPTS"
 echo "Recovery time (s)    : $RECOVERY"
 echo "Outcome (2/1/0)      : $OUTCOME"
