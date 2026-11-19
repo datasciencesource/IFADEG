@@ -1,5 +1,22 @@
 #!/bin/bash
+# ===== Part 0: bandwidth, latency, packet loss, free disk =====
+sudo apt-get install -y speedtest-cli iputils-ping >/dev/null 2>&1
 
+P0_LOG="$HOME/part0_$(date +%Y%m%d_%H%M%S).log"
+
+BW=$(speedtest-cli --simple 2>/dev/null | awk '/^Download:/{print $2}')
+PING_OUT=$(ping -c 20 8.8.8.8)
+LAT=$(echo "$PING_OUT" | awk -F'/' '/rtt/{print $5}')
+LOSS=$(echo "$PING_OUT" | grep -oE '[0-9.]+% packet loss' | grep -oE '^[0-9.]+')
+DISK=$(df -BG / | awk 'NR==2{gsub("G","",$4); print $4}')
+
+{
+echo "Date: $(date '+%Y-%m-%d %H:%M:%S')"
+echo "Network bandwidth (Mbit/s): ${BW:-NA}"
+echo "Network latency (ms) / packet loss (%): ${LAT:-NA} / ${LOSS:-NA}"
+echo "Free disk before run (GB): $DISK"
+} | tee "$P0_LOG"
+# ===== end Part 0 =====
 sudo apt-get update -y
 sudo apt install openjdk-11-jdk openssh-server wget -y
 
