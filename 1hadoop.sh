@@ -8,6 +8,7 @@
 #                      Peak CPU (%), Mean CPU (%), Peak RAM (GB), Error / log
 # Outcome: 2 = success on 1st attempt, 1 = success after retry, 0 = failed
 # Success = all 5 Hadoop daemons running (jps), not only exit code 0.
+# Recovery time: 0 if no failure; failure -> success if recovered; time spent retrying if failed (I_REC = 0).
 # Output:  ~/ifadeg_logs/S1_<date_time>.log, one row in part0.csv and one row in part1.csv
 
 RUN_TS="$(date +%Y%m%d_%H%M%S)"   # log name; Run ID is recorded manually
@@ -34,7 +35,8 @@ exec > >(while IFS= read -r l; do printf '[%(%Y-%m-%d %H:%M:%S)T] %s\n' -1 "$l";
 # PART 0: Run header - bandwidth, latency, packet loss, free disk
 # (measured first, NOT counted in S1 time or data)
 # ############################################################
-sudo apt-get install -y speedtest-cli iputils-ping >/dev/null 2>&1
+# speedtest-cli should be pre-installed in the base VM snapshot; install only if missing
+command -v speedtest-cli >/dev/null 2>&1 || sudo apt-get install -y speedtest-cli >/dev/null 2>&1
 BW=$(speedtest-cli --simple 2>/dev/null | awk '/^Download:/{print $2}')
 PING_OUT=$(ping -c 20 8.8.8.8)
 LAT=$(echo "$PING_OUT" | awk -F'/' '/rtt/{print $5}')
@@ -70,22 +72,29 @@ sampler() {
 }
 
 # Bytes received on all network interfaces except lo
-rx_bytes() { awk -F'[: ]+' 'NR>2 && $2!="lo"{s+=$3} END{print s+0}' /proc/net/dev; }
+rx_bytes() {
+    awk 'NR>2 { line=$0; sub(/^[ \t]+/, "", line); split(line, a, ":")
+                if (a[1] != "lo") { split(a[2], b, " "); s += b[1] } }
+         END { printf "%.0f", s+0 }' /proc/net/dev
+}
 
 # S1 verification: all 5 Hadoop daemons must be running (wait up to 30 s)
+# Sets MISSING = daemons not running (empty if all OK)
 verify_s1() {
     for k in 1 2 3 4 5 6; do
-        ok=1
+        MISSING=""
         for p in NameNode DataNode SecondaryNameNode ResourceManager NodeManager; do
-            jps 2>/dev/null | grep -qw "$p" || ok=0
+            jps 2>/dev/null | grep -qw "$p" || MISSING="$MISSING $p"
         done
-        [ "$ok" -eq 1 ] && return 0
+        MISSING="${MISSING# }"
+        [ -z "$MISSING" ] && return 0
         sleep 5
     done
     return 1
 }
 
-# ================= ORIGINAL S1 INSTALLATION (unchanged) =================
+# ================= ORIGINAL S1 INSTALLATION =================
+# Changes: wget is timed; tar runs without -v (shorter log). Nothing else changed.
 install_s1() {
 sudo apt-get update -y
 sudo apt install openjdk-11-jdk openssh-server wget -y
@@ -124,7 +133,7 @@ WGET_T0=$(date +%s.%N)
 sudo wget -O hadoop-2.10.2.tar.gz https://archive.apache.org/dist/hadoop/common/hadoop-2.10.2/hadoop-2.10.2.tar.gz
 echo "[IFADEG] wget_seconds=$(awk -v a="$WGET_T0" -v b="$(date +%s.%N)" 'BEGIN{printf "%.1f", b-a}')"
 
-sudo tar -zxvf hadoop-2.10.2.tar.gz
+sudo tar -zxf hadoop-2.10.2.tar.gz
 sudo rm -rf hadoop-2.10.2.tar.gz
 
 sudo rm -rf /usr/local/hadoop
@@ -412,20 +421,25 @@ RX0=$(rx_bytes)
 sampler & SAMPLER_PID=$!
 trap 'kill $SAMPLER_PID 2>/dev/null' EXIT
 
-ATTEMPTS=0; PASSED=0; FIRST_FAIL_EPOCH=""
+ATTEMPTS=0; PASSED=0; FIRST_FAIL_EPOCH=""; FIRST_MISSING=""; LAST_MISSING=""
 while [ "$ATTEMPTS" -lt "$MAX_ATTEMPTS" ]; do
     ATTEMPTS=$((ATTEMPTS+1))
     echo "===== IFADEG $STAGE attempt $ATTEMPTS ====="
-    if [ "$ATTEMPTS" -gt 1 ] && [ -x /usr/local/bin/stop-all.sh ]; then
-        stop-all.sh >/dev/null 2>&1     # clean up half-started daemons before retry
+    if [ "$ATTEMPTS" -gt 1 ]; then
+        # Clean up before retry: stop Hadoop, clear DataNode data
+        # (a re-format gives a new clusterID; old DataNode data would block DataNode)
+        [ -x /usr/local/bin/stop-all.sh ] && stop-all.sh >/dev/null 2>&1
+        sudo rm -rf /usr/local/hadoop_store/hdfs/datanode/*
+        echo "[IFADEG] retry cleanup done (Hadoop stopped, DataNode data cleared)"
     fi
     ( install_s1 )                      # subshell: "cd" and "exit" stay inside
     if verify_s1; then
         PASSED=1; echo "[IFADEG] verify PASS (all 5 Hadoop daemons running)"
         break
     fi
-    echo "[IFADEG] verify FAIL"
-    [ -z "$FIRST_FAIL_EPOCH" ] && FIRST_FAIL_EPOCH=$(date +%s)
+    echo "[IFADEG] verify FAIL: missing $MISSING"
+    LAST_MISSING="$MISSING"
+    if [ -z "$FIRST_FAIL_EPOCH" ]; then FIRST_FAIL_EPOCH=$(date +%s); FIRST_MISSING="$MISSING"; fi
 done
 
 kill "$SAMPLER_PID" 2>/dev/null; wait "$SAMPLER_PID" 2>/dev/null
@@ -436,11 +450,11 @@ DURATION=$((END_EPOCH - START_EPOCH))
 # Outcome and recovery time
 if   [ "$PASSED" -eq 1 ] && [ "$ATTEMPTS" -eq 1 ]; then OUTCOME=2; RECOVERY=0
 elif [ "$PASSED" -eq 1 ]; then OUTCOME=1; RECOVERY=$((END_EPOCH - FIRST_FAIL_EPOCH))
-else OUTCOME=0; RECOVERY="NA"
+else OUTCOME=0; RECOVERY=$((END_EPOCH - FIRST_FAIL_EPOCH))   # time spent on retries; I_REC = 0 in Part 4
 fi
 
-# Data downloaded (MB): network bytes received during S1
-DATA_MB=$(awk -v a="$RX0" -v b="$RX1" 'BEGIN{printf "%.1f",(b-a)/1048576}')
+# Data downloaded (MB, 1 MB = 1,000,000 bytes, same base as speedtest Mbit/s)
+DATA_MB=$(awk -v a="$RX0" -v b="$RX1" 'BEGIN{printf "%.1f",(b-a)/1000000}')
 
 # Download time (s): apt "Fetched ... in Xs" + measured wget time
 sleep 1   # let the log catch up
@@ -454,12 +468,24 @@ read -r PEAK_CPU MEAN_CPU PEAK_RAM < <(awk '{c+=$1; n++; if($1>pc)pc=$1; if($2>p
     END{ if(n) printf "%.1f %.1f %.2f\n",pc,c/n,pr; else print "NA NA NA" }' "$SAMPLES")
 rm -f "$SAMPLES"
 
-# Error / log: log name, plus first error line if not a clean first-attempt success
-ERR_LOG="$(basename "$LOG")"
-if [ "$OUTCOME" -ne 2 ]; then
-    FIRST_ERR=$(grep -iE 'error|failed|fatal|exception|cannot|unable|refused' "$LOG" \
-        | grep -viE 'libgpg-error|IFADEG' | head -1 | sed -E 's/^\[[^]]*\] //' | cut -c1-120 | tr -d '",')
-    [ -n "$FIRST_ERR" ] && ERR_LOG="$ERR_LOG: $FIRST_ERR"
+# Error / log: always filled
+#   2 -> "No error - <log>"
+#   1 -> "Recovered: missing <daemons> (attempt 1) - <log>"
+#   0 -> "Failed: missing <daemons> | first log error: <line> - <log>"
+LOGNAME_ONLY="$(basename "$LOG")"
+first_log_error() {
+    grep -iE 'error|failed|fatal|exception|cannot|unable|refused' "$LOG" \
+        | grep -viE 'libgpg-error|IFADEG|NativeCodeLoader|debconf|WARN' \
+        | grep -vE '\] hadoop-2\.10\.2/' \
+        | head -1 | sed -E 's/^\[[^]]*\] //' | cut -c1-100 | tr -d '",'
+}
+if [ "$OUTCOME" -eq 2 ]; then
+    ERR_LOG="No error - $LOGNAME_ONLY"
+elif [ "$OUTCOME" -eq 1 ]; then
+    ERR_LOG="Recovered: missing $FIRST_MISSING (attempt 1) - $LOGNAME_ONLY"
+else
+    FE="$(first_log_error)"
+    ERR_LOG="Failed: missing $LAST_MISSING${FE:+ | first log error: $FE} - $LOGNAME_ONLY"
 fi
 
 # Save one row to part1.csv
