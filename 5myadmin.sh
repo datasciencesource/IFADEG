@@ -17,12 +17,9 @@
 #   1. S5 stage: measured exactly like S1-S4 (its own Part 1 row; the S5 clock covers S5 only)
 #   2. Run end time of the whole pipeline = S5 End time (if S5 is NR: the moment the pipeline stopped)
 #      -> printed and saved in part0.csv (run_end column)
-#   3. Whole-run summary, calculated after the S5 clock has stopped (does not change S5 measurements)
-#      -> replaces the Part 1 summary table in the form; printed and saved in summary.csv (one row per run)
-#      -> D1-D10 scores for the Deployment items table, DS and DS_g
 #
 # Output:  <user home>/ifadeg_logs/S5_<date_time>.log, one row in part1.csv, D5 + D10 rows in items.csv,
-#          run_end in part0.csv, one row in summary.csv
+#          run_end in part0.csv
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "Please run as root:  sudo ./5myadmin.sh"
@@ -44,7 +41,6 @@ LOG="$LOG_DIR/${STAGE}_${RUN_TS}.log"
 CSV="$LOG_DIR/part1.csv"
 ITEMS_CSV="$LOG_DIR/items.csv"
 P0_CSV="$LOG_DIR/part0.csv"
-SUM_CSV="$LOG_DIR/summary.csv"
 SAMPLES="$LOG_DIR/.${STAGE}_${RUN_TS}.samples"
 : > "$SAMPLES"
 : > "$LOG"
@@ -58,8 +54,7 @@ exec > >(while IFS= read -r l; do printf '[%(%Y-%m-%d %H:%M:%S)T] %s\n' -1 "$l";
 fix_owner() { [ -n "${SUDO_USER:-}" ] && chown -R "$SUDO_USER": "$LOG_DIR" 2>/dev/null; }
 
 # ############################################################
-# END OF PIPELINE: run end time + whole-run summary
-# (uses this run's rows only = rows from the start of the last S1 block onwards)
+# END OF PIPELINE: run end time (= S5 end), saved in part0.csv
 # ############################################################
 save_run_end() {   # $1 = run end time (hh:mm:ss)
     [ -f "$P0_CSV" ] || return
@@ -69,76 +64,6 @@ save_run_end() {   # $1 = run end time (hh:mm:ss)
     awk -F',' -v e="$1" 'BEGIN{OFS=","} { lines[NR]=$0; nf[NR]=NF }
         END { for (i=1;i<=NR;i++) { if (i==NR && i>1 && nf[i]==6) print lines[i] "," e; else print lines[i] } }' \
         "$P0_CSV" > "$P0_CSV.tmp" && mv "$P0_CSV.tmp" "$P0_CSV"
-}
-
-run_summary() {   # $1 = run end time (hh:mm:ss)
-    RUN_END_HMS="$1"
-    RUN_START=$(awk -F',' 'NR>1{s=$2} END{print s}' "$P0_CSV" 2>/dev/null)
-    BW=$(awk -F',' 'NR>1{b=$3} END{print b}' "$P0_CSV" 2>/dev/null)
-    RAM_TOTAL=$(awk '/^MemTotal:/{printf "%.2f", $2/1048576}' /proc/meminfo)
-
-    # this run's Part 1 rows (from the last S1 row)
-    read -r T DL DATA RETRIES TTR MEANCPU PEAKCPU PEAKRAM < <(awk -F',' '
-        NR>1 { n++; row[n]=$0; if ($2=="S1" && prev!="S1") start=n; prev=$2 }
-        END {
-          for (i=start; i<=n; i++) {
-            split(row[i], f, ",")
-            if (f[5]=="NA") continue                       # NR stage: not measured
-            t+=f[5]; dl+=f[6]; da+=f[7]; rt+=f[8]-1; ttr+=f[9]
-            wc+=f[12]*f[5]                                 # duration-weighted mean CPU
-            if (f[11]>pc) pc=f[11]; if (f[13]>pr) pr=f[13]
-          }
-          printf "%d %.1f %.1f %d %d %.1f %.1f %.2f\n", t, dl, da, rt, ttr, (t>0?wc/t:0), pc, pr
-        }' "$CSV")
-    INSTALL=$(awk -v t="$T" -v d="$DL" 'BEGIN{printf "%.1f", t-d}')
-    THRU=$(awk -v m="$DATA" -v d="$DL" 'BEGIN{ if (d>0) printf "%.2f", m*8/d; else print "NA" }')
-    UTIL=$(awk -v th="$THRU" -v bw="$BW" 'BEGIN{ if (th!="NA" && bw+0>0) printf "%.1f", th/bw*100; else print "NA" }')
-
-    # this run's item rows (from the last S1 row), in D1..D10 order
-    awk -F',' 'NR>1 { n++; row[n]=$0; if ($2=="S1" && prev!="S1") start=n; prev=$2 }
-        END { for (i=start; i<=n; i++) print row[i] }' "$ITEMS_CSV" > "$LOG_DIR/.items_run.tmp"
-
-    echo ""
-    echo "================ IFADEG RUN SUMMARY ================"
-    echo "Run start time / end time (Part 0)       : ${RUN_START:-NA} / $RUN_END_HMS"
-    echo "Total deployment time T (s) [sum S1-S5]  : $T"
-    echo "Total download time (s) / install (s)    : $DL / $INSTALL"
-    echo "Total data downloaded (MB)               : $DATA"
-    echo "Download throughput (Mbps)               : $THRU"
-    echo "Bandwidth utilisation (%)                : $UTIL   (Part 0 bandwidth ${BW:-NA} Mbit/s)"
-    echo "Total retries (sum of attempts - 1)      : $RETRIES"
-    echo "Total error recovery time, TTR (s)       : $TTR"
-    echo "Mean CPU (%) / peak CPU (%)              : $MEANCPU / $PEAKCPU"
-    echo "Peak RAM (GB)                            : $PEAKRAM"
-    echo "VM RAM seen by OS (GB, info only)        : $RAM_TOTAL   (RAM allocated to VM: use the UTM value in Part 0)"
-    echo "----------------------------------------------------"
-    echo "Deployment items (D1-D10):"
-    PASSED_N=0; FIRST_N=0; SCORE_SUM=0
-    for it in D1 D2 D3 D4 D5 D6 D7 D8 D9 D10; do
-        line=$(awk -F',' -v it="$it" '$4==it' "$LOG_DIR/.items_run.tmp" | tail -1)
-        if [ -z "$line" ]; then
-            printf "  %-4s %-5s %-3s %s\n" "$it" "-" "-" "no record (stage not run)"
-            continue
-        fi
-        res=$(echo "$line" | cut -d',' -f5); sc=$(echo "$line" | cut -d',' -f6)
-        ev=$(echo "$line" | cut -d',' -f7- | tr -d '"')
-        printf "  %-4s %-5s %-3s %s\n" "$it" "$res" "$sc" "$ev"
-        case "$sc" in
-            2) PASSED_N=$((PASSED_N+1)); FIRST_N=$((FIRST_N+1)); SCORE_SUM=$((SCORE_SUM+2)) ;;
-            1) PASSED_N=$((PASSED_N+1)); SCORE_SUM=$((SCORE_SUM+1)) ;;
-        esac                                             # 0 and NR add nothing
-    done
-    DS=$(awk -v p="$PASSED_N" 'BEGIN{printf "%.0f", p/10*100}')
-    DSG=$(awk -v s="$SCORE_SUM" 'BEGIN{printf "%.0f", s/20*100}')
-    echo "----------------------------------------------------"
-    echo "Items passed (2 or 1) / first attempt (2) : $PASSED_N / 10 · $FIRST_N / 10"
-    echo "DS (%) / DS_g (%)                         : $DS / $DSG"
-    echo "===================================================="
-    rm -f "$LOG_DIR/.items_run.tmp"
-
-    [ -f "$SUM_CSV" ] || echo "date,run_start,run_end,T_s,download_s,install_s,data_mb,throughput_mbps,bandwidth_mbps,bw_util_pct,retries,ttr_s,mean_cpu_pct,peak_cpu_pct,peak_ram_gb,vm_ram_gb,items_passed,items_first,DS_pct,DSg_pct" > "$SUM_CSV"
-    echo "$(date +%Y-%m-%d),${RUN_START:-NA},$RUN_END_HMS,$T,$DL,$INSTALL,$DATA,$THRU,${BW:-NA},$UTIL,$RETRIES,$TTR,$MEANCPU,$PEAKCPU,$PEAKRAM,$RAM_TOTAL,$PASSED_N,$FIRST_N,$DS,$DSG" >> "$SUM_CSV"
-    echo "Saved: $SUM_CSV"
 }
 
 # ---------- NR check: was the previous stage (S4) successful? ----------
@@ -156,7 +81,6 @@ if [ "$LAST_S4_OUTCOME" = "0" ] || [ "$LAST_S4_OUTCOME" = "NR" ]; then
     RUN_END_HMS=$(date '+%H:%M:%S')            # pipeline stopped before S5: end = now
     echo "RUN END TIME (whole pipeline)            : $RUN_END_HMS (pipeline stopped before S5)"
     save_run_end "$RUN_END_HMS"
-    run_summary "$RUN_END_HMS"
     sleep 1; rm -f "$SAMPLES"; fix_owner
     exit 1
 fi
@@ -358,5 +282,5 @@ echo "Saved: $CSV and $ITEMS_CSV"
 echo ""
 echo "RUN END TIME (whole pipeline = S5 end)   : $END_HMS"
 save_run_end "$END_HMS"
-run_summary "$END_HMS"
+echo "Saved: run end time in $P0_CSV"
 sleep 1; fix_owner
