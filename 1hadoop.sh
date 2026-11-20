@@ -7,9 +7,12 @@
 #                      Attempts, Recovery time (s), Outcome (2/1/0),
 #                      Peak CPU (%), Mean CPU (%), Peak RAM (GB), Error / log
 # Outcome: 2 = success on 1st attempt, 1 = success after retry, 0 = failed
-# Success = all 5 Hadoop daemons running (jps), not only exit code 0.
+# Success = D1 + D6 both pass (not only exit code 0):
+#   D1  hadoop version prints "Hadoop 2.10.2" and /usr/local/hadoop exists
+#   D6  jps lists NameNode, DataNode, SecondaryNameNode, ResourceManager, NodeManager
+# Item score: 2 = passed on attempt 1, 1 = passed on a later attempt, 0 = not passed at the end
 # Recovery time: 0 if no failure; failure -> success if recovered; time spent retrying if failed (I_REC = 0).
-# Output:  ~/ifadeg_logs/S1_<date_time>.log, one row in part0.csv and one row in part1.csv
+# Output:  ~/ifadeg_logs/S1_<date_time>.log, one row in part0.csv, one row in part1.csv, D1 + D6 rows in items.csv
 
 RUN_TS="$(date +%Y%m%d_%H%M%S)"   # log name; Run ID is recorded manually
 STAGE="S1"
@@ -18,6 +21,7 @@ LOG_DIR="$HOME/ifadeg_logs"
 mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/${STAGE}_${RUN_TS}.log"
 CSV="$LOG_DIR/part1.csv"
+ITEMS_CSV="$LOG_DIR/items.csv"
 SAMPLES="$LOG_DIR/.${STAGE}_${RUN_TS}.samples"
 : > "$SAMPLES"
 : > "$LOG"
@@ -78,19 +82,36 @@ rx_bytes() {
          END { printf "%.0f", s+0 }' /proc/net/dev
 }
 
-# S1 verification: all 5 Hadoop daemons must be running (wait up to 30 s)
-# Sets MISSING = daemons not running (empty if all OK)
+# S1 verification: D1 + D6 (from Instrument 1)
+# Sets D1_OK, D6_OK (1/0), D1_EV, D6_EV (evidence), ITEMS (summary) and FAIL_MSG (empty if all pass)
 verify_s1() {
+    FAIL_MSG=""
+    # D1: hadoop version prints Hadoop 2.10.2; /usr/local/hadoop exists
+    HV=$(hadoop version 2>/dev/null | grep -m1 '^Hadoop ')
+    if [ "$HV" = "Hadoop 2.10.2" ] && [ -d /usr/local/hadoop ]; then
+        D1_OK=1; D1_EV="$HV; /usr/local/hadoop exists"
+    else
+        D1_OK=0; D1_EV="${HV:-hadoop version not found}"
+        FAIL_MSG="D1 Hadoop 2.10.2 not installed"
+    fi
+    # D6: all 5 Hadoop daemons in jps (wait up to 30 s)
     for k in 1 2 3 4 5 6; do
         MISSING=""
         for p in NameNode DataNode SecondaryNameNode ResourceManager NodeManager; do
             jps 2>/dev/null | grep -qw "$p" || MISSING="$MISSING $p"
         done
         MISSING="${MISSING# }"
-        [ -z "$MISSING" ] && return 0
+        [ -z "$MISSING" ] && break
         sleep 5
     done
-    return 1
+    if [ -z "$MISSING" ]; then
+        D6_OK=1; D6_EV="5/5 daemons"
+    else
+        D6_OK=0; D6_EV="missing $MISSING"
+        FAIL_MSG="${FAIL_MSG:+$FAIL_MSG; }D6 missing $MISSING"
+    fi
+    ITEMS="D1 $( [ $D1_OK -eq 1 ] && echo PASS || echo FAIL ) ($D1_EV) · D6 $( [ $D6_OK -eq 1 ] && echo PASS || echo FAIL ) ($D6_EV)"
+    [ "$D1_OK" -eq 1 ] && [ "$D6_OK" -eq 1 ]
 }
 
 # ================= ORIGINAL S1 INSTALLATION =================
@@ -421,7 +442,7 @@ RX0=$(rx_bytes)
 sampler & SAMPLER_PID=$!
 trap 'kill $SAMPLER_PID 2>/dev/null' EXIT
 
-ATTEMPTS=0; PASSED=0; FIRST_FAIL_EPOCH=""; FIRST_MISSING=""; LAST_MISSING=""
+ATTEMPTS=0; PASSED=0; FIRST_FAIL_EPOCH=""; FIRST_FAIL_MSG=""; LAST_FAIL_MSG=""; D1_FIRST=""; D6_FIRST=""
 while [ "$ATTEMPTS" -lt "$MAX_ATTEMPTS" ]; do
     ATTEMPTS=$((ATTEMPTS+1))
     echo "===== IFADEG $STAGE attempt $ATTEMPTS ====="
@@ -433,13 +454,16 @@ while [ "$ATTEMPTS" -lt "$MAX_ATTEMPTS" ]; do
         echo "[IFADEG] retry cleanup done (Hadoop stopped, DataNode data cleared)"
     fi
     ( install_s1 )                      # subshell: "cd" and "exit" stay inside
-    if verify_s1; then
-        PASSED=1; echo "[IFADEG] verify PASS (all 5 Hadoop daemons running)"
+    verify_s1; VRC=$?
+    [ "$D1_OK" -eq 1 ] && [ -z "$D1_FIRST" ] && D1_FIRST=$ATTEMPTS
+    [ "$D6_OK" -eq 1 ] && [ -z "$D6_FIRST" ] && D6_FIRST=$ATTEMPTS
+    if [ "$VRC" -eq 0 ]; then
+        PASSED=1; echo "[IFADEG] verify PASS: $ITEMS"
         break
     fi
-    echo "[IFADEG] verify FAIL: missing $MISSING"
-    LAST_MISSING="$MISSING"
-    if [ -z "$FIRST_FAIL_EPOCH" ]; then FIRST_FAIL_EPOCH=$(date +%s); FIRST_MISSING="$MISSING"; fi
+    echo "[IFADEG] verify FAIL: $FAIL_MSG ($ITEMS)"
+    LAST_FAIL_MSG="$FAIL_MSG"
+    if [ -z "$FIRST_FAIL_EPOCH" ]; then FIRST_FAIL_EPOCH=$(date +%s); FIRST_FAIL_MSG="$FAIL_MSG"; fi
 done
 
 kill "$SAMPLER_PID" 2>/dev/null; wait "$SAMPLER_PID" 2>/dev/null
@@ -470,8 +494,8 @@ rm -f "$SAMPLES"
 
 # Error / log: always filled
 #   2 -> "No error - <log>"
-#   1 -> "Recovered: missing <daemons> (attempt 1) - <log>"
-#   0 -> "Failed: missing <daemons> | first log error: <line> - <log>"
+#   1 -> "Recovered: <first failure> (attempt 1) - <log>"
+#   0 -> "Failed: <last failure> | first log error: <line> - <log>"
 LOGNAME_ONLY="$(basename "$LOG")"
 first_log_error() {
     grep -iE 'error|failed|fatal|exception|cannot|unable|refused' "$LOG" \
@@ -482,15 +506,25 @@ first_log_error() {
 if [ "$OUTCOME" -eq 2 ]; then
     ERR_LOG="No error - $LOGNAME_ONLY"
 elif [ "$OUTCOME" -eq 1 ]; then
-    ERR_LOG="Recovered: missing $FIRST_MISSING (attempt 1) - $LOGNAME_ONLY"
+    ERR_LOG="Recovered: $FIRST_FAIL_MSG (attempt 1) - $LOGNAME_ONLY"
 else
     FE="$(first_log_error)"
-    ERR_LOG="Failed: missing $LAST_MISSING${FE:+ | first log error: $FE} - $LOGNAME_ONLY"
+    ERR_LOG="Failed: $LAST_FAIL_MSG${FE:+ | first log error: $FE} - $LOGNAME_ONLY"
 fi
 
 # Save one row to part1.csv
 [ -f "$CSV" ] || echo "date,stage,start,end,duration_s,download_time_s,data_downloaded_mb,attempts,recovery_time_s,outcome,peak_cpu_pct,mean_cpu_pct,peak_ram_gb,error_log" > "$CSV"
 echo "$(date +%Y-%m-%d),$STAGE,$START_HMS,$END_HMS,$DURATION,$DL_TIME,$DATA_MB,$ATTEMPTS,$RECOVERY,$OUTCOME,$PEAK_CPU,$MEAN_CPU,$PEAK_RAM,\"$ERR_LOG\"" >> "$CSV"
+
+# Item scores (2 = passed on attempt 1, 1 = passed later, 0 = not passed at the end)
+item_score() {  # $1 = passes now (1/0), $2 = first attempt it passed
+    if [ "$1" -eq 1 ]; then [ "$2" = "1" ] && echo 2 || echo 1; else echo 0; fi
+}
+D1_SCORE=$(item_score "$D1_OK" "$D1_FIRST")
+D6_SCORE=$(item_score "$D6_OK" "$D6_FIRST")
+[ -f "$ITEMS_CSV" ] || echo "date,stage,stage_start,item,result,score,evidence" > "$ITEMS_CSV"
+echo "$(date +%Y-%m-%d),$STAGE,$START_HMS,D1,$( [ $D1_OK -eq 1 ] && echo PASS || echo FAIL ),$D1_SCORE,\"$(echo "$D1_EV" | tr -d '",')\"" >> "$ITEMS_CSV"
+echo "$(date +%Y-%m-%d),$STAGE,$START_HMS,D6,$( [ $D6_OK -eq 1 ] && echo PASS || echo FAIL ),$D6_SCORE,\"$(echo "$D6_EV" | tr -d '",')\"" >> "$ITEMS_CSV"
 
 echo ""
 echo "----- Part 1: $STAGE (1hadoop.sh) -----"
@@ -504,5 +538,7 @@ echo "Outcome (2/1/0)      : $OUTCOME"
 echo "Peak / Mean CPU (%)  : $PEAK_CPU / $MEAN_CPU"
 echo "Peak RAM (GB)        : $PEAK_RAM"
 echo "Error / log          : $ERR_LOG"
+echo "Deployment items     : $ITEMS"
+echo "Item scores          : D1 = $D1_SCORE · D6 = $D6_SCORE"
 echo "-----------------------------------------------"
-echo "Saved: $CSV"
+echo "Saved: $CSV and $ITEMS_CSV"
