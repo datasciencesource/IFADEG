@@ -11,8 +11,9 @@
 #   D2  /opt/nifi/bin/nifi.sh and /opt/nifi/lib/nifi-api-1.28.1.jar exist
 #   D7  nifi.sh status reports running (polled every 15 s, up to 5 min)
 #   D9  https://localhost:8443/nifi/ returns 200 or 302 (polled every 15 s, up to 5 min)
+# Item score: 2 = passed on attempt 1, 1 = passed on a later attempt, 0 = not passed at the end, NR = not reached
 # Recovery time: 0 if no failure; failure -> success if recovered; time spent retrying if failed (I_REC = 0).
-# Output:  <user home>/ifadeg_logs/S2_<date_time>.log and one row in part1.csv
+# Output:  <user home>/ifadeg_logs/S2_<date_time>.log, one row in part1.csv, D2 + D7 + D9 rows in items.csv
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "Please run as root:  sudo ./2nifi.sh"
@@ -32,6 +33,7 @@ LOG_DIR="$USER_HOME/ifadeg_logs"
 mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/${STAGE}_${RUN_TS}.log"
 CSV="$LOG_DIR/part1.csv"
+ITEMS_CSV="$LOG_DIR/items.csv"
 SAMPLES="$LOG_DIR/.${STAGE}_${RUN_TS}.samples"
 : > "$SAMPLES"
 : > "$LOG"
@@ -40,6 +42,7 @@ SAMPLES="$LOG_DIR/.${STAGE}_${RUN_TS}.samples"
 exec > >(while IFS= read -r l; do printf '[%(%Y-%m-%d %H:%M:%S)T] %s\n' -1 "$l"; done | tee -a "$LOG") 2>&1
 
 [ -f "$CSV" ] || echo "date,stage,start,end,duration_s,download_time_s,data_downloaded_mb,attempts,recovery_time_s,outcome,peak_cpu_pct,mean_cpu_pct,peak_ram_gb,error_log" > "$CSV"
+[ -f "$ITEMS_CSV" ] || echo "date,stage,stage_start,item,result,score,evidence" > "$ITEMS_CSV"
 
 fix_owner() { [ -n "${SUDO_USER:-}" ] && chown -R "$SUDO_USER": "$LOG_DIR" 2>/dev/null; }
 
@@ -48,8 +51,12 @@ LAST_S1_OUTCOME=$(awk -F',' '$2=="S1"{o=$10} END{print o}' "$CSV")
 if [ "$LAST_S1_OUTCOME" = "0" ] || [ "$LAST_S1_OUTCOME" = "NR" ]; then
     echo "[IFADEG] S1 outcome = $LAST_S1_OUTCOME, so S2 is not reached (NR)"
     echo "$(date +%Y-%m-%d),$STAGE,NA,NA,NA,NA,NA,0,NA,NR,NA,NA,NA,\"Not reached: S1 failed - $(basename "$LOG")\"" >> "$CSV"
+    for it in D2 D7 D9; do
+        echo "$(date +%Y-%m-%d),$STAGE,NA,$it,NR,NR,\"Not reached: S1 failed\"" >> "$ITEMS_CSV"
+    done
     echo "----- Part 1: $STAGE (2nifi.sh) -----"
     echo "Outcome (2/1/0)      : NR (not reached, S1 failed)"
+    echo "Item scores          : D2 = NR · D7 = NR · D9 = NR"
     echo "-----------------------------------------------"
     sleep 1; rm -f "$SAMPLES"; fix_owner
     exit 1
@@ -93,39 +100,44 @@ http_code() {
 }
 
 # S2 verification: D2, D7, D9 (from Instrument 1)
-# Sets ITEMS (per-item results) and FAIL_MSG (empty if all pass)
+# Sets D2_OK/D7_OK/D9_OK (1/0), D2_EV/D7_EV/D9_EV (evidence), ITEMS (summary), FAIL_MSG (empty if all pass)
+# A later item is not checked if an earlier one fails (it is recorded as FAIL, "not checked").
 verify_s2() {
-    ITEMS=""; FAIL_MSG=""
+    FAIL_MSG=""
+    D2_OK=0; D7_OK=0; D9_OK=0
+    D2_EV="not checked"; D7_EV="not checked"; D9_EV="not checked"
     # D2: files exist
     if ls /opt/nifi/bin/nifi.sh /opt/nifi/lib/nifi-api-1.28.1.jar >/dev/null 2>&1; then
-        ITEMS="D2 PASS"
+        D2_OK=1; D2_EV="both files exist"
     else
-        ITEMS="D2 FAIL"; FAIL_MSG="D2 NiFi files missing"
-        return 1
+        D2_EV="files missing"; FAIL_MSG="D2 NiFi files missing"
     fi
     # D7: nifi.sh status reports running (every 15 s, up to 5 min)
-    T0=$(date +%s); D7=0
-    while [ $(( $(date +%s) - T0 )) -le 300 ]; do
-        if /opt/nifi/bin/nifi.sh status 2>/dev/null | grep -q "is currently running"; then D7=1; break; fi
-        sleep 15
-    done
-    if [ "$D7" -eq 1 ]; then
-        ITEMS="$ITEMS · D7 PASS (after $(( $(date +%s) - T0 )) s)"
-    else
-        ITEMS="$ITEMS · D7 FAIL"; FAIL_MSG="D7 NiFi not running after 5 min"
-        return 1
+    if [ "$D2_OK" -eq 1 ]; then
+        T0=$(date +%s)
+        while [ $(( $(date +%s) - T0 )) -le 300 ]; do
+            if /opt/nifi/bin/nifi.sh status 2>/dev/null | grep -q "is currently running"; then D7_OK=1; break; fi
+            sleep 15
+        done
+        if [ "$D7_OK" -eq 1 ]; then D7_EV="running (after $(( $(date +%s) - T0 )) s)"
+        else D7_EV="not running after 5 min"; FAIL_MSG="D7 NiFi not running after 5 min"; fi
     fi
     # D9: web UI returns 200 or 302 (every 15 s, up to 5 min)
-    T0=$(date +%s); CODE="000"
-    while [ $(( $(date +%s) - T0 )) -le 300 ]; do
-        CODE=$(http_code https://localhost:8443/nifi/)
-        case "$CODE" in 200|302) break ;; esac
-        sleep 15
-    done
-    case "$CODE" in
-        200|302) ITEMS="$ITEMS · D9 PASS (HTTP $CODE after $(( $(date +%s) - T0 )) s)"; return 0 ;;
-        *)       ITEMS="$ITEMS · D9 FAIL (HTTP $CODE)"; FAIL_MSG="D9 web UI not reachable (HTTP $CODE)"; return 1 ;;
-    esac
+    if [ "$D7_OK" -eq 1 ]; then
+        T0=$(date +%s); CODE="000"
+        while [ $(( $(date +%s) - T0 )) -le 300 ]; do
+            CODE=$(http_code https://localhost:8443/nifi/)
+            case "$CODE" in 200|302) break ;; esac
+            sleep 15
+        done
+        case "$CODE" in
+            200|302) D9_OK=1; D9_EV="HTTP $CODE after $(( $(date +%s) - T0 )) s" ;;
+            *)       D9_EV="HTTP $CODE"; FAIL_MSG="D9 web UI not reachable (HTTP $CODE)" ;;
+        esac
+    fi
+    pf() { [ "$1" -eq 1 ] && echo PASS || echo FAIL; }
+    ITEMS="D2 $(pf $D2_OK) ($D2_EV) · D7 $(pf $D7_OK) ($D7_EV) · D9 $(pf $D9_OK) ($D9_EV)"
+    [ "$D2_OK" -eq 1 ] && [ "$D7_OK" -eq 1 ] && [ "$D9_OK" -eq 1 ]
 }
 
 # ================= ORIGINAL S2 INSTALLATION =================
@@ -167,7 +179,7 @@ RX0=$(rx_bytes)
 sampler & SAMPLER_PID=$!
 trap 'kill $SAMPLER_PID 2>/dev/null' EXIT
 
-ATTEMPTS=0; PASSED=0; FIRST_FAIL_EPOCH=""; FIRST_FAIL_MSG=""; LAST_FAIL_MSG=""
+ATTEMPTS=0; PASSED=0; FIRST_FAIL_EPOCH=""; FIRST_FAIL_MSG=""; LAST_FAIL_MSG=""; D2_FIRST=""; D7_FIRST=""; D9_FIRST=""
 while [ "$ATTEMPTS" -lt "$MAX_ATTEMPTS" ]; do
     ATTEMPTS=$((ATTEMPTS+1))
     echo "===== IFADEG $STAGE attempt $ATTEMPTS ====="
@@ -178,7 +190,11 @@ while [ "$ATTEMPTS" -lt "$MAX_ATTEMPTS" ]; do
         echo "[IFADEG] retry cleanup done (NiFi stopped)"
     fi
     ( install_s2 )                      # subshell: "cd" and "exit" stay inside
-    if verify_s2; then
+    verify_s2; VRC=$?
+    [ "$D2_OK" -eq 1 ] && [ -z "$D2_FIRST" ] && D2_FIRST=$ATTEMPTS
+    [ "$D7_OK" -eq 1 ] && [ -z "$D7_FIRST" ] && D7_FIRST=$ATTEMPTS
+    [ "$D9_OK" -eq 1 ] && [ -z "$D9_FIRST" ] && D9_FIRST=$ATTEMPTS
+    if [ "$VRC" -eq 0 ]; then
         PASSED=1; echo "[IFADEG] verify PASS: $ITEMS"
         break
     fi
@@ -236,6 +252,19 @@ fi
 # Save one row to part1.csv
 echo "$(date +%Y-%m-%d),$STAGE,$START_HMS,$END_HMS,$DURATION,$DL_TIME,$DATA_MB,$ATTEMPTS,$RECOVERY,$OUTCOME,$PEAK_CPU,$MEAN_CPU,$PEAK_RAM,\"$ERR_LOG\"" >> "$CSV"
 
+# Item scores (2 = passed on attempt 1, 1 = passed later, 0 = not passed at the end)
+item_score() {  # $1 = passes now (1/0), $2 = first attempt it passed
+    if [ "$1" -eq 1 ]; then [ "$2" = "1" ] && echo 2 || echo 1; else echo 0; fi
+}
+D2_SCORE=$(item_score "$D2_OK" "$D2_FIRST")
+D7_SCORE=$(item_score "$D7_OK" "$D7_FIRST")
+D9_SCORE=$(item_score "$D9_OK" "$D9_FIRST")
+for it in D2 D7 D9; do
+    ok_var="${it}_OK"; sc_var="${it}_SCORE"; ev_var="${it}_EV"
+    res=$( [ "${!ok_var}" -eq 1 ] && echo PASS || echo FAIL )
+    echo "$(date +%Y-%m-%d),$STAGE,$START_HMS,$it,$res,${!sc_var},\"$(echo "${!ev_var}" | tr -d '",')\"" >> "$ITEMS_CSV"
+done
+
 echo ""
 echo "----- Part 1: $STAGE (2nifi.sh) -----"
 echo "Start / End          : $START_HMS / $END_HMS"
@@ -249,6 +278,7 @@ echo "Peak / Mean CPU (%)  : $PEAK_CPU / $MEAN_CPU"
 echo "Peak RAM (GB)        : $PEAK_RAM"
 echo "Error / log          : $ERR_LOG"
 echo "Deployment items     : $ITEMS"
+echo "Item scores          : D2 = $D2_SCORE · D7 = $D7_SCORE · D9 = $D9_SCORE"
 echo "-----------------------------------------------"
-echo "Saved: $CSV"
+echo "Saved: $CSV and $ITEMS_CSV"
 sleep 1; fix_owner
