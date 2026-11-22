@@ -82,18 +82,59 @@ else S=0; N="HTTP $HTTP"; fi
 record C7 "phpMyAdmin login works" $S "$N"
 
 # ---- C8 NiFi flow loaded and valid ----
+# Lists every processor (all process groups) with its run status and validation errors.
+c8_check() {
+  curl -sk -H "Authorization: Bearer $TOKEN" \
+    "$NIFI_HOST/nifi-api/flow/process-groups/root/status?recursive=true" > /tmp/c8_status.json
+  python3 - /tmp/c8_status.json "$NIFI_HOST" "$TOKEN" <<'PYC'
+import json, sys, ssl, urllib.request
+status = json.load(open(sys.argv[1])); host, token = sys.argv[2], sys.argv[3]
+ctx = ssl._create_unverified_context()
+def get(path):
+    req = urllib.request.Request(host + path, headers={"Authorization": "Bearer " + token})
+    return json.load(urllib.request.urlopen(req, context=ctx))
+procs = []
+def walk(snap):
+    for p in snap.get("processorStatusSnapshots", []):
+        procs.append(p["processorStatusSnapshot"])
+    for g in snap.get("processGroupStatusSnapshots", []):
+        walk(g["processGroupStatusSnapshot"])
+walk(status["processGroupStatus"]["aggregateSnapshot"])
+invalid = []
+for p in procs:
+    if p.get("runStatus") == "Invalid":
+        try:
+            errs = get("/nifi-api/processors/" + p["id"])["component"].get("validationErrors") or []
+        except Exception:
+            errs = []
+        invalid.append("{}: {}".format(p.get("name"), (errs[0] if errs else "invalid")[:120]))
+print("{}|{}".format(len(procs), len(invalid)))
+for i in invalid:
+    print(i)
+PYC
+}
 if [ -z "$TOKEN" ]; then
   record C8 "NiFi flow loaded and valid" NR "No NiFi token (C3 failed)"
 else
-  J=$(curl -sk -H "Authorization: Bearer $TOKEN" "$NIFI_HOST/nifi-api/flow/status")
-  RUN=$(num "$J" runningCount); STOP=$(num "$J" stoppedCount)
-  INV=$(num "$J" invalidCount); DIS=$(num "$J" disabledCount)
-  RUN=${RUN:-0}; STOP=${STOP:-0}; INV=${INV:-0}; DIS=${DIS:-0}
-  COMP=$((RUN + STOP + INV + DIS))
-  if   [ "$COMP" -ge 1 ] && [ "$INV" -eq 0 ]; then S=2
-  elif [ "$COMP" -ge 1 ]; then S=1
-  else S=0; fi
-  record C8 "NiFi flow loaded and valid" $S "components=$COMP (running=$RUN stopped=$STOP invalid=$INV disabled=$DIS)"
+  OUT=$(c8_check)
+  COMP=$(echo "$OUT" | head -1 | cut -d'|' -f1); INV=$(echo "$OUT" | head -1 | cut -d'|' -f2)
+  COMP=${COMP:-0}; INV=${INV:-0}
+  # Flow not imported yet: ask the evaluator to import it (as the form's run procedure says), then re-check once
+  if [ "$COMP" -eq 0 ] && [ -t 0 ]; then
+    echo ""
+    echo ">>> C8: no processors on the NiFi canvas."
+    echo ">>> Import the NiFi template, add it to the canvas and enable the controller services,"
+    read -rp ">>> then press Enter to re-check C8 (or type s + Enter to skip): " ANS
+    if [ "$ANS" != "s" ]; then
+      OUT=$(c8_check)
+      COMP=$(echo "$OUT" | head -1 | cut -d'|' -f1); INV=$(echo "$OUT" | head -1 | cut -d'|' -f2)
+      COMP=${COMP:-0}; INV=${INV:-0}
+    fi
+  fi
+  if   [ "$COMP" -eq 0 ]; then S=0; N="no processors on canvas (template not imported)"
+  elif [ "$INV" -eq 0 ]; then S=2; N="$COMP processors, 0 invalid"
+  else S=1; N="$COMP processors, $INV invalid: $(echo "$OUT" | tail -n +2 | paste -sd ';' -)"; fi
+  record C8 "NiFi flow loaded and valid" $S "$N"
 fi
 
 # ---- Output ----
