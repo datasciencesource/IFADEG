@@ -17,11 +17,11 @@ LOG="$OUT_DIR/${RUN_ID}_part3.txt"
 
 # ---------------- Configuration ----------------
 # Source (remote MySQL) - use the same values as NiFi's DBCPConnectionPool for the remote side
-SRC_HOST=REMOTE_HOST_HERE
+SRC_HOST=69.175.69.34
 SRC_PORT=3306
-SRC_USER=REMOTE_USER_HERE
-SRC_PASS=REMOTE_PASSWORD_HERE
-SRC_TABLE=dbtest.table_stock
+SRC_USER=sumrachna_hd
+SRC_TABLE=sumrachna_hd.table_stock
+SRC_PASS='RootAdmin11!!'      # do NOT upload this file to the public GitHub repo
 
 # Target (local MySQL)
 TGT_HOST=localhost
