@@ -204,7 +204,7 @@ CREATE TABLE IF NOT EXISTS table_stock (
     product_id INT,
     purchasing_price FLOAT,
     quantity DOUBLE,
-    stock_date DATETIME
+    stock_date VARCHAR(20)
 );
 EOF
 
