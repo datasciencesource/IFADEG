@@ -8,7 +8,7 @@
 # Scores: 2 = criterion met | 0 = not met | NR = not run (e.g. remote unreachable)
 # Run AFTER the NiFi flow has finished and BEFORE restoring the snapshot.
 
-RUN_ID=${1:-E1-RXX}
+RUN_ID=${1:?Usage: bash part3_check.sh RUN_ID (e.g. E1-R01)}
 OUT_DIR=/root/ifadeg_runs
 mkdir -p "$OUT_DIR"
 LOG="$OUT_DIR/${RUN_ID}_part3.txt"
@@ -24,6 +24,8 @@ TGT_DB=dbtest
 TABLE=table_stock
 EXPECTED=125
 HDFS_DIR=/big_data
+# Columns compared by the checksum (same order on both sides)
+COLS="id,product_id,purchasing_price,quantity,stock_date"
 
 # Hadoop may not be on PATH in a non-interactive shell
 export PATH=$PATH:/usr/local/hadoop/bin
@@ -41,7 +43,7 @@ record() {   # record <No> <Item> <Score> <Notes>
 
 # Same query on both sides: record count + MD5 of all rows in id order
 Q="SET SESSION group_concat_max_len=1000000;
-SELECT COUNT(*), MD5(GROUP_CONCAT(CONCAT_WS('|',id,product_id,purchasing_price,quantity,\`datetime\`)
+SELECT COUNT(*), MD5(GROUP_CONCAT(CONCAT_WS('|',$COLS)
 ORDER BY id SEPARATOR '\n')) FROM $TABLE;"
 
 SRC=$(MYSQL_PWD="$SRC_PASS" mysql -h "$SRC_HOST" -u "$SRC_USER" -N "$SRC_DB" -e "$Q" 2>&1)
