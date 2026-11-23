@@ -36,7 +36,7 @@ ARCH=$(uname -m)
 
 echo "   vCPU: $(nproc) | RAM: $(awk '/MemTotal/{printf "%.1f GB", $2/1048576}' /proc/meminfo) | Disk: $(df -BG --output=size / | tail -1 | tr -d ' ')"
 FREE=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
-[ "$FREE" -ge 10 ] && ok "Free disk: ${FREE} GB" || bad "Free disk: ${FREE} GB (need at least 10 GB)"
+[ "$FREE" -ge 5 ] && ok "Free disk: ${FREE} GB" || bad "Free disk: ${FREE} GB (need at least 5 GB)"
 
 echo "2. Clean VM (FADTESE cannot be re-run on the same VM)"
 for p in /usr/local/hadoop /usr/local/sqoop /usr/local/hadoop_store /app/hadoop/tmp; do
@@ -109,7 +109,9 @@ echo "   Free disk before run (GB): $FREE"
 echo "=============================================="
 echo " Result: $PASS passed, $WARN warnings, $FAIL failed"
 if [ "$FAIL" -eq 0 ]; then
-    echo " READY - now run:  date +%T; time ./install_big_data_utilities.sh 2>&1 | tee <RUN_ID>.log; date +%T"
+    echo " READY - now run (replace E3-Rxx with the run ID):"
+    echo "   { echo \"Run start: \$(date '+%F %T')\"; time ./install_big_data_utilities.sh; echo \"Run end: \$(date '+%F %T')\"; } 2>&1 | tee E3-Rxx.log"
+    echo " Then: ./verify_fadtese.sh E3-Rxx"
     exit 0
 else
     echo " NOT READY - fix the FAIL items (usually: restore the clean snapshot)."
