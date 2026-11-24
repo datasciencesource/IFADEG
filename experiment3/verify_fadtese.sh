@@ -1,119 +1,155 @@
 #!/bin/bash
 # =====================================================================
-# precheck.sh - run BEFORE each FADTESE run (Experiment 3, Instrument 3)
-# Checks that the VM is clean and ready. It does not change anything.
+# verify_fadtese.sh - post-deployment verification for FADTESE (Experiment 3)
+# Same items, commands and success criteria as Instrument 1 / ADS, limited to
+# what FADTESE installs. Items outside FADTESE's scope are NA (not counted as 0).
 #
-# Usage (as root, in /root):  ./precheck.sh
-# Default script checked: /root/install_big_data_utilities.sh
-# Exit code 0 = READY, 1 = NOT READY (fix the FAIL items first)
+# Usage (as root, right after run_fadtese.sh):  ./verify_fadtese.sh
+#
+# Part 1 deployment items : D1 Hadoop installed, D3 Connector/J, D6 Hadoop services started
+#                           (D2, D4, D5, D7-D10 = NA: NiFi, MySQL, phpMyAdmin are not in FADTESE)
+# Part 2 component checks : C1 HDFS healthy, C2 HDFS read/write   (C3-C8 = NA)
+# Scores: 2 = pass; 0 = fail; NR = not reached (FADTESE stopped before this part).
+#         Part 2 only: 1 = passed when the check was repeated after a 30 s wait.
+# Final FADTESE Outcome (part1.csv) = 2 only if the script exited 0 AND D1, D3, D6 pass.
+#
+# Output (in /root/ifadeg_logs): items.csv, part2.csv (+ Outcome update in part1.csv)
+#        /root/ifadeg_runs/<RUN_ID>_verify.txt  (summary for the form)
 # =====================================================================
 
-SCRIPT="${1:-/root/install_big_data_utilities.sh}"
-KIT_DIR="$(cd "$(dirname "$0")" && pwd)"
-# SHA-256 of the published FADTESE script (as attached in chat).
-# If the GitHub copy gives a different value, run: sha256sum install_big_data_utilities.sh
-# on the downloaded official copy and paste that value here.
-EXPECTED_SHA="faa5f5ed325a9a6c2f028c015d072490b1b79dc6d97426aa5fbec60011a72216"
+RUN_ID="${1:-$(awk -F',' 'NR>1{r=$2} END{print r}' /root/ifadeg_logs/e3_split.csv 2>/dev/null)}"   # latest run; Run ID is recorded manually
+[ -z "$RUN_ID" ] && { echo "No run found in /root/ifadeg_logs/e3_split.csv - run ./run_fadtese.sh first"; exit 1; }
+[ "$(id -u)" -ne 0 ] && { echo "Please run as root: sudo -i"; exit 1; }
 
-PASS=0; FAIL=0; WARN=0
-ok()   { echo "  [PASS] $1"; PASS=$((PASS+1)); }
-bad()  { echo "  [FAIL] $1"; FAIL=$((FAIL+1)); }
-warn() { echo "  [WARN] $1"; WARN=$((WARN+1)); }
+LOG_DIR="/root/ifadeg_logs"; RUNS_DIR="/root/ifadeg_runs"
+mkdir -p "$LOG_DIR" "$RUNS_DIR"
+CSV="$LOG_DIR/part1.csv"; ITEMS_CSV="$LOG_DIR/items.csv"; P2_CSV="$LOG_DIR/part2.csv"
+SPLIT_CSV="$LOG_DIR/e3_split.csv"
+OUT="$RUNS_DIR/${RUN_ID}_verify.txt"
+CONNECTOR_JAR="mysql-connector-java-5.1.34-bin.jar"
 
-echo "=============================================="
-echo " FADTESE pre-check  $(date '+%F %T')"
-echo "=============================================="
+# FADTESE's environment (set here explicitly; ~/.bashrc is not read by non-interactive shells)
+export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
+export HADOOP_HOME=/usr/local/hadoop HADOOP_INSTALL=/usr/local/hadoop HADOOP_PREFIX=/usr/local/hadoop
+export HADOOP_CONF_DIR=/usr/local/hadoop/etc/hadoop HADOOP_COMMON_HOME=/usr/local/hadoop
+export HADOOP_HDFS_HOME=/usr/local/hadoop HADOOP_MAPRED_HOME=/usr/local/hadoop YARN_HOME=/usr/local/hadoop
+export PATH="$PATH:$JAVA_HOME/bin:$HADOOP_HOME/bin:$HADOOP_HOME/sbin"
 
-echo "1. User and system"
-[ "$(id -u)" -eq 0 ] && ok "Running as root" || bad "Not root - run: sudo su -"
+TODAY=$(date +%Y-%m-%d)
+STAGE_START=$(awk -F',' '$2=="FADTESE"{s=$3} END{print s}' "$CSV" 2>/dev/null)
+EXIT_CODE=$(awk -F',' -v r="$RUN_ID" '$2==r{e=$7} END{print e}' "$SPLIT_CSV" 2>/dev/null)
+[ -z "$STAGE_START" ] && echo "[IFADEG] note: no FADTESE row in part1.csv - was run_fadtese.sh used?"
 
-OS=$(lsb_release -ds 2>/dev/null || grep PRETTY_NAME /etc/os-release | cut -d= -f2 | tr -d '"')
-echo "$OS" | grep -q "Ubuntu 24.04" && ok "Guest OS: $OS" || bad "Guest OS is '$OS' (FADTESE needs Ubuntu 24.04)"
+clean() { echo "$1" | tr -d '",'; }
 
-ARCH=$(uname -m)
-[ "$ARCH" = "x86_64" ] && ok "Architecture: x86_64 (matches FADTESE's amd64 JAVA_HOME)" \
-                       || bad "Architecture: $ARCH - FADTESE hard-codes java-11-openjdk-amd64"
+# ---------------- Part 1: deployment items ----------------
+# D1: hadoop version prints Hadoop 2.10.2; /usr/local/hadoop exists
+HV=$(hadoop version 2>/dev/null | grep -m1 '^Hadoop ')
+if [ "$HV" = "Hadoop 2.10.2" ] && [ -d /usr/local/hadoop ]; then D1=2; D1_EV="$HV; /usr/local/hadoop exists"
+else D1=0; D1_EV="${HV:-hadoop version not found}"; fi
 
-echo "   vCPU: $(nproc) | RAM: $(awk '/MemTotal/{printf "%.1f GB", $2/1048576}' /proc/meminfo) | Disk: $(df -BG --output=size / | tail -1 | tr -d ' ')"
-FREE=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
-[ "$FREE" -ge 5 ] && ok "Free disk: ${FREE} GB" || bad "Free disk: ${FREE} GB (need at least 5 GB)"
+# D3: Connector/J JAR in Sqoop's lib folder
+if ls /usr/local/sqoop/lib 2>/dev/null | grep -q "$CONNECTOR_JAR"; then D3=2; D3_EV="$CONNECTOR_JAR present"
+else D3=0; D3_EV="$CONNECTOR_JAR missing in /usr/local/sqoop/lib"; fi
 
-echo "2. Clean VM (FADTESE cannot be re-run on the same VM)"
-for p in /usr/local/hadoop /usr/local/sqoop /usr/local/hadoop_store /app/hadoop/tmp; do
-    [ -e "$p" ] && bad "$p already exists - restore the clean snapshot" || ok "$p not present"
+# D6: all 5 Hadoop daemons in jps (checked for up to 30 s, same tolerance as ADS)
+for k in 1 2 3 4 5 6; do
+    MISSING=""
+    for p in NameNode DataNode SecondaryNameNode ResourceManager NodeManager; do
+        jps 2>/dev/null | grep -qw "$p" || MISSING="$MISSING $p"
+    done
+    MISSING="${MISSING# }"
+    [ -z "$MISSING" ] && break
+    sleep 5
 done
-[ -f /root/.ssh/id_rsa ] && bad "/root/.ssh/id_rsa exists - ssh-keygen would stop FADTESE (set -e)" \
-                         || ok "No existing root SSH key"
-grep -q "HADOOP_INSTALL" /root/.bashrc 2>/dev/null && bad "/root/.bashrc already has Hadoop lines - not a clean VM" \
-                                                   || ok "/root/.bashrc clean"
-grep -q "JAVA_HOME" /etc/environment && bad "/etc/environment already has JAVA_HOME - not a clean VM" \
-                                     || ok "/etc/environment clean"
-pgrep -f "org.apache.hadoop" >/dev/null && bad "Hadoop processes already running" || ok "No Hadoop processes running"
-if pgrep -x apt-get >/dev/null || pgrep -x apt >/dev/null || pgrep -x unattended-upgr >/dev/null || pgrep -f unattended-upgrade >/dev/null; then
-    bad "apt / unattended-upgrades is running - wait until it finishes (it would lock apt)"
+if [ -z "$MISSING" ]; then D6=2; D6_EV="all 5 daemons running"; else D6=0; D6_EV="missing $MISSING"; fi
+
+# ---------------- Part 2: component verification ----------------
+check_c1() {
+    REPORT=$(hdfs dfsadmin -report 2>/dev/null)
+    LIVE=$(echo "$REPORT" | grep -oE 'Live datanodes \([0-9]+\)' | grep -oE '[0-9]+')
+    SAFE=$(hdfs dfsadmin -safemode get 2>/dev/null | grep -oE 'OFF|ON' | head -1)
+    C1_EV="Live DataNodes=${LIVE:-0}; safe mode=${SAFE:-unknown}"
+    [ "${LIVE:-0}" -ge 1 ] && [ "$SAFE" = "OFF" ]
+}
+check_c2() {
+    C2_OUT=$(hdfs dfs -mkdir -p /big_data 2>/dev/null && echo ok | hdfs dfs -put -f - /big_data/_check.txt 2>/dev/null \
+             && hdfs dfs -cat /big_data/_check.txt 2>/dev/null)
+    [ "$C2_OUT" = "ok" ] && C2_EV="Prints ok" || C2_EV="read/write failed"
+    [ "$C2_OUT" = "ok" ]
+}
+# Part 2 score: 2 = pass first time; 1 = pass after a 30 s wait; 0 = fail
+if [ "$D1" -eq 2 ] && [ "$D6" -eq 2 ]; then
+    if check_c1; then C1=2; else sleep 30; if check_c1; then C1=1; else C1=0; fi; fi
+    if check_c2; then C2=2; else sleep 30; if check_c2; then C2=1; else C2=0; fi; fi
 else
-    ok "apt is free (no lock holder)"
+    C1=NR; C1_EV="not reached (Hadoop not installed or not running)"
+    C2=NR; C2_EV="not reached (Hadoop not installed or not running)"
 fi
 
-echo "3. FADTESE script and verification script"
-if [ -f "$SCRIPT" ]; then
-    SHA=$(sha256sum "$SCRIPT" | cut -d' ' -f1)
-    [ "$SHA" = "$EXPECTED_SHA" ] && ok "FADTESE script unchanged (SHA-256 matches)" \
-                                 || bad "SHA-256 mismatch: $SHA (copy differs from the published script)"
-    bash -n "$SCRIPT" 2>/dev/null && ok "FADTESE syntax valid" || bad "FADTESE syntax error"
-    file "$SCRIPT" 2>/dev/null | grep -q CRLF && bad "Script has Windows (CRLF) line endings"
-else
-    bad "FADTESE script not found: $SCRIPT"
+# If FADTESE stopped early (exit code not 0) and an item failed, the item was not reached
+if [ -n "$EXIT_CODE" ] && [ "$EXIT_CODE" != "0" ]; then
+    [ "$D1" = "0" ] && { D1=NR; D1_EV="not reached (FADTESE stopped, exit $EXIT_CODE)"; }
+    [ "$D3" = "0" ] && { D3=NR; D3_EV="not reached (FADTESE stopped, exit $EXIT_CODE)"; }
+    [ "$D6" = "0" ] && { D6=NR; D6_EV="not reached (FADTESE stopped, exit $EXIT_CODE)"; }
 fi
-for f in verify_fadtese.sh; do
-    [ -f "$KIT_DIR/$f" ] && ok "Kit file present: $f" || bad "Kit file missing: $KIT_DIR/$f"
+
+res() { case "$1" in 2|1) echo PASS ;; NR) echo NR ;; NA) echo NA ;; *) echo FAIL ;; esac; }
+num() { case "$1" in 2|1|0) echo "$1" ;; *) echo 0 ;; esac; }   # NR counts as 0
+
+# ---------------- Save items.csv and part2.csv ----------------
+[ -f "$ITEMS_CSV" ] || echo "date,stage,stage_start,item,result,score,evidence" > "$ITEMS_CSV"
+for it in D1 D3 D6; do
+    sc_var="$it"; ev_var="${it}_EV"
+    echo "$TODAY,FADTESE,${STAGE_START:-NA},$it,$(res "${!sc_var}"),${!sc_var},\"$(clean "${!ev_var}")\"" >> "$ITEMS_CSV"
+done
+for it in D2 D4 D5 D7 D8 D9 D10; do
+    echo "$TODAY,FADTESE,${STAGE_START:-NA},$it,NA,NA,\"not in FADTESE scope\"" >> "$ITEMS_CSV"
+done
+[ -f "$P2_CSV" ] || echo "date,run_id,item,result,score,evidence" > "$P2_CSV"
+echo "$TODAY,$RUN_ID,C1,$(res "$C1"),$C1,\"$(clean "$C1_EV")\"" >> "$P2_CSV"
+echo "$TODAY,$RUN_ID,C2,$(res "$C2"),$C2,\"$(clean "$C2_EV")\"" >> "$P2_CSV"
+for it in C3 C4 C5 C6 C7 C8; do
+    echo "$TODAY,$RUN_ID,$it,NA,NA,\"not in FADTESE scope\"" >> "$P2_CSV"
 done
 
-echo "4. Tools needed by FADTESE and the recorder"
-for t in bash apt-get wget tar ping bc python3 sha256sum; do
-    command -v "$t" >/dev/null 2>&1 && ok "$t available" || bad "$t missing (install it in the clean snapshot)"
-done
-command -v speedtest-cli >/dev/null 2>&1 && ok "speedtest-cli available" \
-    || warn "speedtest-cli missing - bandwidth will be recorded as NA"
-
-echo "5. Network and download links"
-ping -c 1 -W 2 downloads.apache.org >/dev/null 2>&1 \
-    && ok "ping downloads.apache.org works (FADTESE ADRI check will pass)" \
-    || bad "ping downloads.apache.org fails - FADTESE ADRI check will FAIL (ICMP may be blocked)"
-for u in https://downloads.apache.org/hadoop/common/hadoop-2.10.2/hadoop-2.10.2.tar.gz \
-         https://archive.apache.org/dist/sqoop/1.4.7/sqoop-1.4.7.bin__hadoop-2.6.0.tar.gz \
-         https://dlcdn.apache.org/commons/lang/binaries/commons-lang-2.6-bin.tar.gz \
-         https://cdn.mysql.com/archives/mysql-connector-java-5.1/mysql-connector-java-5.1.34.tar.gz; do
-    wget -q --spider --timeout=15 --tries=2 "$u" && ok "Link OK: ${u##*/}" || bad "Link DEAD/unreachable: $u"
-done
-apt-cache policy openjdk-11-jdk 2>/dev/null | grep -q Candidate && ok "openjdk-11-jdk available in apt sources" \
-    || warn "openjdk-11-jdk not found in apt cache (FADTESE runs apt-get update first, usually fine)"
-
-echo "6. Part 0 values for the form (copy these into Instrument 3)"
-echo "   Date                     : $(date +%F)"
-echo "   Guest OS / kernel / arch : $OS / $(uname -r) / $ARCH"
-echo "   VM spec                  : $(nproc) vCPU, $(awk '/MemTotal/{printf "%.1f GB", $2/1048576}' /proc/meminfo), $(df -BG --output=size / | tail -1 | tr -d ' ') disk"
-[ -f "$SCRIPT" ] && echo "   FADTESE SHA-256 (first 12): $(sha256sum "$SCRIPT" | cut -c1-12)"
-if command -v speedtest-cli >/dev/null 2>&1; then
-    BW=$(speedtest-cli --simple 2>/dev/null | awk '/^Download/{print $2}')
-    echo "   Network bandwidth (Mbit/s): ${BW:-NA}"
+# ---------------- Final FADTESE Outcome in part1.csv ----------------
+OUTCOME_NOTE=""
+if [ -f "$CSV" ] && [ -n "$STAGE_START" ]; then
+    CUR=$(awk -F',' '$2=="FADTESE"{o=$10} END{print o}' "$CSV")
+    if [ "$CUR" = "2" ] && { [ "$(num "$D1")" -ne 2 ] || [ "$(num "$D3")" -ne 2 ] || [ "$(num "$D6")" -ne 2 ]; }; then
+        # script exited 0 but a deployment item failed -> Outcome 0
+        awk -F',' 'BEGIN{OFS=","} { if ($2=="FADTESE") last=NR; line[NR]=$0 }
+             END { for (i=1;i<=NR;i++) { if (i==last) { n=split(line[i],f,","); f[10]="0"; sub(/No error/,"Failed: script finished but a deployment item failed",f[14]); s=f[1];
+                   for (j=2;j<=n;j++) s=s "," f[j]; print s } else print line[i] } }' "$CSV" > "$CSV.tmp" && mv "$CSV.tmp" "$CSV"
+        OUTCOME_NOTE="Outcome changed 2 -> 0: script finished but a deployment item failed"
+        CUR=0
+    fi
+    FINAL_OUTCOME="$CUR"
 else
-    echo "   Network bandwidth (Mbit/s): NA (speedtest-cli not installed)"
+    FINAL_OUTCOME="NA"
 fi
-PING_OUT=$(ping -c 20 8.8.8.8 2>/dev/null)
-LAT=$(echo "$PING_OUT" | awk -F'/' '/rtt|round-trip/{print $5}')
-LOSS=$(echo "$PING_OUT" | grep -oE '[0-9.]+% packet loss' | grep -oE '^[0-9.]+')
-echo "   Latency (ms) / loss (%)  : ${LAT:-NA} / ${LOSS:-NA}"
-echo "   Free disk before run (GB): $FREE"
 
-echo "=============================================="
-echo " Result: $PASS passed, $WARN warnings, $FAIL failed"
-if [ "$FAIL" -eq 0 ]; then
-    echo " READY - now run (replace E3-Rxx with the run ID):"
-    echo "   { echo \"Run start: \$(date '+%F %T')\"; time ./install_big_data_utilities.sh; echo \"Run end: \$(date '+%F %T')\"; } 2>&1 | tee E3-Rxx.log"
-    echo " Then: ./verify_fadtese.sh E3-Rxx"
-    exit 0
-else
-    echo " NOT READY - fix the FAIL items (usually: restore the clean snapshot)."
-    exit 1
-fi
+P1_TOTAL=$(( $(num "$D1") + $(num "$D3") + $(num "$D6") ))
+P2_TOTAL=$(( $(num "$C1") + $(num "$C2") ))
+
+# ---------------- Summary (screen + file) ----------------
+{
+echo "IFADEG Instrument 3 - FADTESE verification | Run: $RUN_ID | $(date '+%F %T %z')"
+printf '%-6s | %-34s | %-5s | %s\n' "No." "Item" "Score" "Notes"
+echo "-------+------------------------------------+-------+------------------------------"
+printf '%-6s | %-34s | %-5s | %s\n' "D1" "Hadoop installed" "$D1" "$D1_EV"
+printf '%-6s | %-34s | %-5s | %s\n' "D3" "Connector/J in Sqoop lib" "$D3" "$D3_EV"
+printf '%-6s | %-34s | %-5s | %s\n' "D6" "Hadoop services started" "$D6" "$D6_EV"
+printf '%-6s | %-34s | %-5s | %s\n' "D2,D4,D5,D7-D10" "" "NA" "not in FADTESE scope"
+echo "-------+------------------------------------+-------+------------------------------"
+printf '%-6s | %-34s | %-5s | %s\n' "C1" "HDFS is healthy" "$C1" "$C1_EV"
+printf '%-6s | %-34s | %-5s | %s\n' "C2" "HDFS read/write works" "$C2" "$C2_EV"
+printf '%-6s | %-34s | %-5s | %s\n' "C3-C8" "" "NA" "not in FADTESE scope"
+echo "-------+------------------------------------+-------+------------------------------"
+echo "Part 1 items total (FADTESE scope): $P1_TOTAL / 6"
+echo "Part 2 total (FADTESE scope)      : $P2_TOTAL / 4"
+echo "Final FADTESE Outcome (2/0)       : $FINAL_OUTCOME ${OUTCOME_NOTE:+($OUTCOME_NOTE)}"
+echo "Saved: $ITEMS_CSV, $P2_CSV; summary $OUT"
+echo "Next:  ./sqoop_check.sh"
+} | tee "$OUT"
