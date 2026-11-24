@@ -29,6 +29,10 @@ SAMPLES="$LOG_DIR/.${STAGE}_${RUN_TS}.samples"
 # Ask for the sudo password now, so waiting for it is not counted in Duration
 sudo -v
 
+# Terminal for live progress bars. Bars go to the terminal only, NOT to the log,
+# so the log and the CSV parsing stay clean. Empty if there is no terminal (e.g. nohup).
+if { : > /dev/tty; } 2>/dev/null; then TTY=/dev/tty; else TTY=""; fi
+
 # Run start time (Part 0): the beginning of the whole run
 RUN_START_HMS=$(date '+%H:%M:%S')
 
@@ -82,6 +86,77 @@ rx_bytes() {
          END { printf "%.0f", s+0 }' /proc/net/dev
 }
 
+# ---------- Progress display (screen only; does not change any measurement) ----------
+S1_TOTAL=9
+
+# Overall stage progress (% of steps completed), e.g.
+#   [IFADEG] S1 [######..............]  33%  step 4/9: Download Hadoop
+# (goes to screen + log; contains "IFADEG" so first_log_error ignores it)
+s1_step() {
+    local n=$1; shift
+    local done=$(( n-1 )) w=20 f stepinfo
+    f=$(( done*w/S1_TOTAL ))
+    if [ "$n" -le "$S1_TOTAL" ]; then stepinfo="step $n/$S1_TOTAL: $*"; else stepinfo="$*"; fi
+    printf '[IFADEG] S1 [%s%s] %3d%%  %s\n' \
+        "$(printf '%*s' "$f" '' | tr ' ' '#')" "$(printf '%*s' $((w-f)) '' | tr ' ' '.')" \
+        $(( done*100/S1_TOTAL )) "$stepinfo"
+}
+
+# One bar line: label, current bytes, total bytes (0 = unknown), elapsed seconds
+draw_bar() {
+    local label=$1 cur=$2 total=$3 el=$4 w=30 pct f mb tmb spd
+    mb=$(awk -v b="$cur" 'BEGIN{printf "%.1f", b/1000000}')
+    spd=$(awk -v b="$cur" -v t="$el" 'BEGIN{printf "%.1f", (t>0) ? b/1000000/t : 0}')
+    if [ "$total" -gt 0 ]; then
+        pct=$(( cur*100/total )); [ "$pct" -gt 100 ] && pct=100
+        f=$(( pct*w/100 ))
+        tmb=$(awk -v b="$total" 'BEGIN{printf "%.1f", b/1000000}')
+        printf '\r\033[K  %-16s [%s%s] %3d%%  %s/%s MB  %s MB/s  %ds' "$label" \
+            "$(printf '%*s' "$f" '' | tr ' ' '#')" "$(printf '%*s' $((w-f)) '' | tr ' ' '-')" \
+            "$pct" "$mb" "$tmb" "$spd" "$el"
+    else
+        printf '\r\033[K  %-16s %s MB  %s MB/s  %ds' "$label" "$mb" "$spd" "$el"
+    fi
+}
+
+# Background watcher: redraws the bar from the size of $2 until killed
+# (also stops by itself if the owning shell $4 is gone, e.g. after Ctrl+C)
+progress_watch() {
+    local label=$1 path=$2 total=$3 owner=$4 t0 cur
+    t0=$(date +%s); sleep 0.3          # let the log pipe print the step line first
+    while kill -0 "$owner" 2>/dev/null; do
+        cur=$(du -sb "$path" 2>/dev/null | cut -f1)
+        draw_bar "$label" "${cur:-0}" "$total" $(( $(date +%s) - t0 ))
+        sleep 0.5
+    done
+}
+
+# with_progress LABEL PATH TOTAL_BYTES -- command ...
+# Runs the command in the FOREGROUND exactly as before; only the watcher is in the background.
+with_progress() {
+    local label=$1 path=$2 total=${3:-0} wp="" rc t0 cur
+    shift 3; [ "$1" = "--" ] && shift
+    t0=$(date +%s)
+    if [ -n "$TTY" ]; then
+        progress_watch "$label" "$path" "$total" "$BASHPID" > "$TTY" 2>/dev/null &
+        wp=$!
+    fi
+    "$@"; rc=$?
+    if [ -n "$wp" ]; then
+        { kill "$wp"; wait "$wp"; } 2>/dev/null
+        cur=$(du -sb "$path" 2>/dev/null | cut -f1); cur=${cur:-0}
+        [ "$rc" -eq 0 ] && [ "$total" -gt 0 ] && cur=$total
+        { draw_bar "$label" "$cur" "$total" $(( $(date +%s) - t0 ))
+          [ "$rc" -eq 0 ] && printf '  done\n' || printf '  FAILED (exit %d)\n' "$rc"; } > "$TTY"
+    fi
+    return $rc
+}
+
+# Size of a remote file in bytes (0 if unknown) - one HEAD request, a few KB
+url_size() {
+    wget --spider -S "$1" 2>&1 | awk 'tolower($1)=="content-length:"{n=$2} END{print n+0}'
+}
+
 # S1 verification: D1 + D6 (from Instrument 1)
 # Sets D1_OK, D6_OK (1/0), D1_EV, D6_EV (evidence), ITEMS (summary) and FAIL_MSG (empty if all pass)
 verify_s1() {
@@ -102,6 +177,7 @@ verify_s1() {
         done
         MISSING="${MISSING# }"
         [ -z "$MISSING" ] && break
+        echo "[IFADEG] D6 check $k/6: waiting for $MISSING"
         sleep 5
     done
     if [ -z "$MISSING" ]; then
@@ -115,11 +191,14 @@ verify_s1() {
 }
 
 # ================= ORIGINAL S1 INSTALLATION =================
-# Changes: wget is timed; tar runs without -v (shorter log). Nothing else changed.
+# Changes: wget is timed; tar runs without -v (shorter log); step markers and
+# progress bars added; wget runs without sudo into a temp folder (see step 4).
 install_s1() {
+s1_step 1 "Install Java 11, OpenSSH, wget (apt)"
 sudo apt-get update -y
 sudo apt install openjdk-11-jdk openssh-server wget -y
 
+s1_step 2 "Set JAVA_HOME and environment"
 JAVA_HOME_PATH=$(ls -d /usr/lib/jvm/java-11-openjdk-* 2>/dev/null | head -n 1)
 
 echo "JAVA_HOME=\"$JAVA_HOME_PATH\"" | sudo tee /etc/environment
@@ -138,6 +217,7 @@ export HADOOP_PREFIX=$HADOOP_INSTALL
 export HADOOP_CONF_DIR=$HADOOP_PREFIX/etc/hadoop
 export SSH_OPTS="-o StrictHostKeyChecking=no"
 
+s1_step 3 "SSH keys for localhost"
 if [ ! -f "$HOME/.ssh/id_rsa" ]; then
   yes "" | ssh-keygen -t rsa -P ""
 fi
@@ -150,18 +230,30 @@ sudo systemctl restart ssh
 
 cd /opt || exit
 
+s1_step 4 "Download Hadoop 2.10.2"
+# wget runs WITHOUT sudo. With "sudo wget" on Ubuntu 24.04, sudo puts wget in its own
+# pseudo-terminal; wget then thinks it is a background job and sends everything to
+# /opt/wget-log ("Redirecting output to 'wget-log'"), so the screen looked frozen.
+HADOOP_URL=https://archive.apache.org/dist/hadoop/common/hadoop-2.10.2/hadoop-2.10.2.tar.gz
+DL_DIR=$(mktemp -d /tmp/ifadeg_dl.XXXXXX)
+TGZ="$DL_DIR/hadoop-2.10.2.tar.gz"
+TGZ_SIZE=$(url_size "$HADOOP_URL")
 WGET_T0=$(date +%s.%N)
-sudo wget -O hadoop-2.10.2.tar.gz https://archive.apache.org/dist/hadoop/common/hadoop-2.10.2/hadoop-2.10.2.tar.gz
+with_progress "Downloading" "$TGZ" "$TGZ_SIZE" -- wget -nv -O "$TGZ" "$HADOOP_URL"
 echo "[IFADEG] wget_seconds=$(awk -v a="$WGET_T0" -v b="$(date +%s.%N)" 'BEGIN{printf "%.1f", b-a}')"
 
-sudo tar -zxf hadoop-2.10.2.tar.gz
-sudo rm -rf hadoop-2.10.2.tar.gz
+s1_step 5 "Extract Hadoop to /usr/local/hadoop"
+TAR_SIZE=$(gzip -l "$TGZ" 2>/dev/null | awk 'NR==2{print $2+0}')
+sudo rm -rf /opt/hadoop-2.10.2
+with_progress "Extracting" /opt/hadoop-2.10.2 "${TAR_SIZE:-0}" -- sudo tar -zxf "$TGZ" -C /opt
+rm -rf "$DL_DIR"
 
 sudo rm -rf /usr/local/hadoop
 sudo mkdir -p /usr/local/hadoop
 sudo mv hadoop-2.10.2/* /usr/local/hadoop/
 sudo rm -rf hadoop-2.10.2
 
+s1_step 6 "Environment files and command wrappers"
 sed -i '/# HADOOP_ENV_START/,/# HADOOP_ENV_END/d' ~/.bashrc
 
 cat <<EOF >> ~/.bashrc
@@ -354,6 +446,7 @@ sudo chmod +x /usr/local/bin/stop-dfs.sh
 sudo chmod +x /usr/local/bin/start-yarn.sh
 sudo chmod +x /usr/local/bin/stop-yarn.sh
 
+s1_step 7 "Hadoop configuration (HDFS, core, MapReduce, YARN)"
 sudo mkdir -p /usr/local/hadoop_store/hdfs/namenode
 sudo mkdir -p /usr/local/hadoop_store/hdfs/datanode
 sudo mkdir -p /app/hadoop/tmp
@@ -427,12 +520,15 @@ sudo tee /usr/local/hadoop/etc/hadoop/yarn-site.xml > /dev/null <<EOF
 </configuration>
 EOF
 
+s1_step 8 "Format NameNode"
 hadoop namenode -format -force
 
+s1_step 9 "Start Hadoop daemons"
 start-all.sh
 
 jps
 hadoop version
+s1_step 10 "Installation finished - verifying D1 + D6"
 }
 # ================= END ORIGINAL S1 INSTALLATION =================
 
