@@ -20,7 +20,7 @@
 #
 # Output (in /root/ifadeg_logs): part3.csv, e3_workflow.csv, <RUN_ID>_sqoop.log
 #        /root/ifadeg_runs/<RUN_ID>_part3.txt
-# Needs: mysql client in the clean snapshot (only to read the source for W6/W7).
+# Needs: mysql client (installed automatically if missing, only to read the source for W6/W7).
 # =====================================================================
 
 RUN_ID="${1:-$(awk -F',' 'NR>1{r=$2} END{print r}' /root/ifadeg_logs/e3_split.csv 2>/dev/null)}"   # latest run; Run ID is recorded manually
@@ -63,6 +63,16 @@ myq() { MYSQL_PWD="$REMOTE_PW" mysql -h "$REMOTE_HOST" -P "$REMOTE_PORT" -u "$RE
 for it in W1 W2 W6 W7; do eval "${it}=NR; ${it}_EV='not reached'"; done
 WF_START=NA; WF_END=NA; WF_S=NA; THROUGHPUT=NA; SRC_COUNT=NA; TGT_COUNT=NA
 : > "$SQLOG"
+
+# ---------- mysql client (evaluation only; installed here, after FADTESE was measured) ----------
+if ! command -v mysql >/dev/null 2>&1; then
+    echo "[IFADEG] installing mysql-client (evaluation only, after FADTESE measurement)"
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get install -y mysql-client >>"$SQLOG" 2>&1 \
+        || { apt-get update >>"$SQLOG" 2>&1 && apt-get install -y mysql-client >>"$SQLOG" 2>&1; }
+    command -v mysql >/dev/null 2>&1 && echo "[IFADEG] mysql-client installed: $(mysql --version)" \
+        || echo "[IFADEG] WARNING: mysql-client install failed - see $SQLOG"
+fi
 
 # ---------- Preconditions: Sqoop installed, HDFS up, source readable ----------
 PRE_OK=1
