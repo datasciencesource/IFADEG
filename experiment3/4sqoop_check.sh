@@ -5,9 +5,9 @@
 # to import the SAME source table as IFADEG Experiment 4 into HDFS, then checks
 # that the data arrived complete and unchanged. FADTESE itself is not modified.
 #
-# Usage (as root, after verify_fadtese.sh):  ./sqoop_check.sh
+# Usage (as root, after verify_fadtese.sh, no argument):  ./4sqoop_check.sh
 #   Connection details: edit the defaults below, or pass them as variables, e.g.
-#   REMOTE_HOST=1.2.3.4 REMOTE_USER=myuser ./sqoop_check.sh
+#   REMOTE_HOST=1.2.3.4 REMOTE_USER=myuser REMOTE_DB=myacct_remote_hd ./4sqoop_check.sh
 #   The password is always asked for (not stored).
 #
 # Items (same meaning as Instrument 1 Part 3; scores 2 = pass, 0 = fail, NR = not reached):
@@ -21,10 +21,15 @@
 # Output (in /root/ifadeg_logs): part3.csv, e3_workflow.csv, <RUN_ID>_sqoop.log
 #        /root/ifadeg_runs/<RUN_ID>_part3.txt
 # Needs: mysql client (installed automatically if missing, only to read the source for W6/W7).
+#
+# Experiment 3 kit, rev 2 (2026-11-26). Run order (as root, all 4 kit files in one folder):
+#   1precheck.sh E3-Rxx (must say READY) -> 2run_fadtese.sh -> 3verify_fadtese.sh -> 4sqoop_check.sh
+#   (plain names precheck.sh, run_fadtese.sh, ... also work). Give the Run ID only to precheck.
+#   FADTESE (install_big_data_utilities.sh) is downloaded into / ; results go to /root/ifadeg_logs.
 # =====================================================================
 
 RUN_ID="${1:-$(awk -F',' 'NR>1{r=$2} END{print r}' /root/ifadeg_logs/e3_split.csv 2>/dev/null)}"   # latest run; Run ID is recorded manually
-[ -z "$RUN_ID" ] && { echo "No run found in /root/ifadeg_logs/e3_split.csv - run ./run_fadtese.sh first"; exit 1; }
+[ -z "$RUN_ID" ] && { echo "No run found in /root/ifadeg_logs/e3_split.csv - run run_fadtese.sh first"; exit 1; }
 [ "$(id -u)" -ne 0 ] && { echo "Please run as root: sudo -i"; exit 1; }
 
 # ---------- Source table: the same table as Experiment 4 ----------
