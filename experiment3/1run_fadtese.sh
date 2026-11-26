@@ -47,7 +47,6 @@ EXPECTED_SHA="b7719e30ed191593fa3ec85e7275def0df790e2ada81709951c2496f35122a55"
 EXP_VCPU=4
 EXP_RAM_MIN=3.5; EXP_RAM_MAX=4.2      # GB seen by the guest for a 4 GB VM
 EXP_DISK_MIN=55; EXP_DISK_MAX=70      # GB size of / (this VM shows 68 GB)
-MIN_BW="${MIN_BW:-5}"                 # Mbit/s: below this a WARNING is shown (the run still continues)
 
 STAGE="FADTESE"
 LOG_DIR="/root/ifadeg_logs"
@@ -198,13 +197,6 @@ echo "   VM spec                  : $VCPU vCPU, $RAM_GB GB RAM, $DISK_GB GB disk
 echo "   Network bandwidth (Mbit/s): ${BW:-NA}"
 echo "   Latency (ms) / loss (%)  : ${LAT:-NA} / ${LOSS:-NA}"
 echo "   Free disk before run (GB): $FREE"
-if [ -z "$BW" ]; then
-    warn "bandwidth not measured (speedtest-cli failed or missing)"
-elif awk -v b="$BW" -v m="$MIN_BW" 'BEGIN{exit !(b>=m)}'; then
-    ok "Bandwidth ${BW} Mbit/s (minimum ${MIN_BW})"
-else
-    warn "Low bandwidth: ${BW} Mbit/s (below ${MIN_BW}) - the run continues; note it on the form (slower downloads expected)"
-fi
 [ -z "$LABEL_GIVEN" ] && echo "   (no Run ID given: files use $RUN_ID - write the Run ID on the form)"
 
 echo "=============================================="
