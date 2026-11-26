@@ -41,7 +41,9 @@ get_fadtese() {
     chmod +x "$SCRIPT"
 }
 
-EXPECTED_SHA="faa5f5ed325a9a6c2f028c015d072490b1b79dc6d97426aa5fbec60011a72216"
+# SHA-256 of the published FADTESE script: github.com/datasciencesource/bash-script,
+# main branch, last commit b86a889 (188 lines, 6.51 KB). Check on the VM: sha256sum /install_big_data_utilities.sh
+EXPECTED_SHA="b7719e30ed191593fa3ec85e7275def0df790e2ada81709951c2496f35122a55"
 STAGE="FADTESE"
 KIT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Kit file by plain or numbered name (run_fadtese.sh or 2run_fadtese.sh)
