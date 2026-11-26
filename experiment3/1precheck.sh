@@ -1,12 +1,14 @@
 #!/bin/bash
 # =====================================================================
 # precheck.sh - run BEFORE each FADTESE run (Experiment 3, Instrument 3)
-# Checks that the VM is clean, is the same VM spec as Experiment 4, and
-# that FADTESE is the unchanged published script. It only downloads FADTESE into /
-# if it is missing; it installs nothing and does not wait for apt.
+# Checks the VM spec (same VM as Experiment 4), that FADTESE is the unchanged
+# published script, and that the network can reach the apt mirror and the
+# download links at a usable speed. It only downloads FADTESE into / if missing;
+# it installs nothing and does not wait for apt.
+# The evaluator resets the VM (clean snapshot) and records the Run ID on the form;
+# the clean-VM checks below are only warnings, as a reminder.
 #
-# Usage (as root):  ./1precheck.sh E3-R01
-# (Run ID is recorded manually on the form; an optional label can be given: ./1precheck.sh E3-R01)
+# Usage (as root):  ./1precheck.sh E3-R01   (label optional; it only names the log files)
 # Exit code 0 = READY, 1 = NOT READY (fix the FAIL items first)
 #
 # Output: Part 0 values on screen + /root/ifadeg_logs/.part0_pending
@@ -44,6 +46,7 @@ EXPECTED_SHA="b7719e30ed191593fa3ec85e7275def0df790e2ada81709951c2496f35122a55"
 EXP_VCPU=4
 EXP_RAM_MIN=3.5; EXP_RAM_MAX=4.2      # GB seen by the guest for a 4 GB VM
 EXP_DISK_MIN=55; EXP_DISK_MAX=70      # GB size of / (this VM shows 68 GB)
+MIN_BW="${MIN_BW:-5}"                 # Mbit/s: below this the network is too slow for a fair run
 
 PASS=0; FAIL=0; WARN=0
 ok()   { echo "  [PASS] $1"; PASS=$((PASS+1)); }
@@ -76,19 +79,19 @@ awk -v r="$RAM_GB" -v a="$EXP_RAM_MIN" -v b="$EXP_RAM_MAX" 'BEGIN{exit !(r>=a &&
 FREE=$(df -BG / | awk 'NR==2{gsub("G","",$4); print $4}')     # same command as ADS (1hadoop.sh)
 [ "$FREE" -ge 5 ] && ok "Free disk: ${FREE} GB" || bad "Free disk: ${FREE} GB (need at least 5 GB)"
 
-echo "2. Clean VM (FADTESE cannot be re-run on the same VM)"
+echo "2. Clean VM (reset by the evaluator - warnings only)"
 for p in /usr/local/hadoop /usr/local/sqoop /usr/local/hadoop_store /app/hadoop/tmp; do
-    [ -e "$p" ] && bad "$p already exists - restore the clean snapshot" || ok "$p not present"
+    [ -e "$p" ] && warn "$p exists - VM not reset? FADTESE will likely fail" || ok "$p not present"
 done
-[ -f /root/.ssh/id_rsa ] && bad "/root/.ssh/id_rsa exists - ssh-keygen would stop FADTESE (set -e)" \
+[ -f /root/.ssh/id_rsa ] && warn "/root/.ssh/id_rsa exists - VM not reset? (ssh-keygen would stop FADTESE)" \
                          || ok "No existing root SSH key"
-grep -q "HADOOP_INSTALL" /root/.bashrc 2>/dev/null && bad "/root/.bashrc already has Hadoop lines - not a clean VM" \
+grep -q "HADOOP_INSTALL" /root/.bashrc 2>/dev/null && warn "/root/.bashrc has Hadoop lines - VM not reset?" \
                                                    || ok "/root/.bashrc clean"
-grep -q "JAVA_HOME" /etc/environment && bad "/etc/environment already has JAVA_HOME - not a clean VM" \
+grep -q "JAVA_HOME" /etc/environment && warn "/etc/environment has JAVA_HOME - VM not reset?" \
                                      || ok "/etc/environment clean"
-pgrep -f "org.apache.hadoop" >/dev/null && bad "Hadoop processes already running" || ok "No Hadoop processes running"
+pgrep -f "org.apache.hadoop" >/dev/null && warn "Hadoop processes running - VM not reset?" || ok "No Hadoop processes running"
 if [ -f "$LOG_DIR/part1.csv" ] && grep -q ',FADTESE,' "$LOG_DIR/part1.csv"; then
-    bad "$LOG_DIR/part1.csv already has a FADTESE row - copy the old results to the host and restore the snapshot"
+    warn "$LOG_DIR/part1.csv already has a FADTESE row - copy old results to the host before this run"
 else
     ok "No results from an earlier run in $LOG_DIR"
 fi
@@ -126,6 +129,18 @@ echo "5. Network and download links"
 ping -c 1 -W 2 downloads.apache.org >/dev/null 2>&1 \
     && ok "ping downloads.apache.org works (FADTESE ADRI check will pass)" \
     || bad "ping downloads.apache.org fails - FADTESE ADRI check will FAIL (ICMP may be blocked)"
+# apt mirror reachable (read-only test, the way apt would connect; IPv4 only if apt is set to ForceIPv4)
+MIRRORS=$(grep -hoE '^(deb|URIs:)[^#]*https?://[^ /]+' /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null \
+          | grep -oE 'https?://[^ /]+' | sort -u)
+APT_V4=""; apt-config dump 2>/dev/null | grep -qi 'ForceIPv4 "true"' && APT_V4="-4"
+for m in $MIRRORS; do
+    if wget -q $APT_V4 --spider --timeout=10 --tries=1 "$m/ubuntu/" || wget -q $APT_V4 --spider --timeout=10 --tries=1 "$m/"; then
+        ok "apt mirror reachable: ${m#*://}"
+    else
+        bad "apt mirror NOT reachable: ${m#*://} (FADTESE apt-get would fail; try: echo 'Acquire::ForceIPv4 \"true\";' > /etc/apt/apt.conf.d/99force-ipv4)"
+    fi
+done
+[ -z "$MIRRORS" ] && warn "no apt mirror found in /etc/apt/sources.list*"
 # Check the download links that FADTESE itself uses (read from the script, so they always match)
 URLS=$(grep -oE 'https?://[^ "'"'"']+\.(tar\.gz|tgz|zip|jar)' "$SCRIPT" 2>/dev/null | sort -u)
 if [ -z "$URLS" ]; then
@@ -153,6 +168,14 @@ echo "   VM spec                  : $VCPU vCPU, $RAM_GB GB RAM, $DISK_GB GB disk
 echo "   Network bandwidth (Mbit/s): ${BW:-NA}"
 echo "   Latency (ms) / loss (%)  : ${LAT:-NA} / ${LOSS:-NA}"
 echo "   Free disk before run (GB): $FREE"
+if [ -z "$BW" ]; then
+    warn "bandwidth not measured (speedtest-cli failed or missing)"
+elif awk -v b="$BW" -v m="$MIN_BW" 'BEGIN{exit !(b>=m)}'; then
+    ok "Bandwidth ${BW} Mbit/s (minimum ${MIN_BW})"
+else
+    bad "Bandwidth only ${BW} Mbit/s (minimum ${MIN_BW}) - network too slow for a fair run; check the host network and try again"
+fi
+[ -z "$1" ] && echo "   (no label given: files use $RUN_ID - write the Run ID on the form)"
 
 echo "=============================================="
 echo " Result: $PASS passed, $WARN warnings, $FAIL failed"
@@ -165,6 +188,6 @@ if [ "$FAIL" -eq 0 ]; then
     echo " Then: $(kit_cmd verify_fadtese.sh)   and   $(kit_cmd sqoop_check.sh)"
     exit 0
 else
-    echo " NOT READY - fix the FAIL items (usually: restore the clean snapshot)."
+    echo " NOT READY - fix the FAIL items above, then run again."
     exit 1
 fi
