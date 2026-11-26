@@ -5,7 +5,7 @@
 # timestamps its output and measures from outside.
 #
 # Usage (as root, right after precheck.sh says READY):
-#   ./run_fadtese.sh
+#   ./2run_fadtese.sh
 # (Run ID is recorded manually on the form; files use the label set by precheck.sh)
 #
 # Records (same definitions as ADS, Part 0 + Part 1):
@@ -21,6 +21,11 @@
 #   part0.csv             date,run_start,bandwidth_mbps,latency_ms,packet_loss_pct,free_disk_gb,run_end
 #   part1.csv             same columns as ADS, stage = FADTESE
 #   e3_split.csv          date,run_id,run_start,hadoop_end,hadoop_part_s,rest_part_s,exit_code,sha256
+#
+# Experiment 3 kit, rev 2 (2026-11-26). Run order (as root, all 4 kit files in one folder):
+#   1precheck.sh E3-Rxx (must say READY) -> 2run_fadtese.sh -> 3verify_fadtese.sh -> 4sqoop_check.sh
+#   (plain names precheck.sh, run_fadtese.sh, ... also work). Give the Run ID only to precheck.
+#   FADTESE (install_big_data_utilities.sh) is downloaded into / ; results go to /root/ifadeg_logs.
 # =====================================================================
 
 [ "$(id -u)" -ne 0 ] && { echo "Please run as root: sudo -i"; exit 1; }
@@ -38,6 +43,10 @@ get_fadtese() {
 
 EXPECTED_SHA="faa5f5ed325a9a6c2f028c015d072490b1b79dc6d97426aa5fbec60011a72216"
 STAGE="FADTESE"
+KIT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Kit file by plain or numbered name (run_fadtese.sh or 2run_fadtese.sh)
+kit_file() { for c in "$KIT_DIR/$1" "$KIT_DIR"/[0-9]"$1"; do [ -f "$c" ] && { echo "$c"; return 0; }; done; return 1; }
+kit_cmd()  { local c; c=$(kit_file "$1") && echo "./$(basename "$c")" || echo "./$1"; }
 LOG_DIR="/root/ifadeg_logs"
 mkdir -p "$LOG_DIR"
 # Label for file names: argument, else the one set by precheck.sh, else date_time
@@ -59,7 +68,7 @@ if [ "$SHA" != "$EXPECTED_SHA" ]; then
     exit 1
 fi
 if [ ! -f "$PENDING" ]; then
-    echo "No Part 0 values found. Run ./precheck.sh $RUN_ID first (it must say READY)."
+    echo "No Part 0 values found. Run $(kit_cmd precheck.sh) <Run ID> first (it must say READY)."
     exit 1
 fi
 IFS=',' read -r P0_DATE P0_BW P0_LAT P0_LOSS P0_FREE P0_RUN P0_EPOCH < "$PENDING"
@@ -195,6 +204,6 @@ echo "Error / log          : $ERR_LOG"
 echo "Exit code / SHA-256  : $RC / ${SHA:0:12}   (0 = script finished)"
 echo "-----------------------------------------------"
 echo "Saved: $P0_CSV, $CSV and $SPLIT_CSV"
-echo "Next:  ./verify_fadtese.sh"
+echo "Next:  $(kit_cmd verify_fadtese.sh)"
 } | tee -a "$LOG"
 exit "$RC"
