@@ -4,8 +4,10 @@
 # The FADTESE script is run UNCHANGED (SHA-256 checked); this wrapper only
 # timestamps its output and measures from outside.
 #
-# Usage (as root, right after precheck.sh says READY):
-#   ./2run_fadtese.sh
+# Usage (as root):
+#   ./2run_fadtese.sh E3-R01   runs 1precheck.sh E3-R01 first if no READY precheck exists,
+#                              then starts FADTESE only if precheck says READY
+#   ./2run_fadtese.sh          after a READY precheck (Run ID taken from precheck)
 # (Run ID is recorded manually on the form; files use the label set by precheck.sh)
 #
 # Records (same definitions as ADS, Part 0 + Part 1):
@@ -51,14 +53,26 @@ kit_file() { for c in "$KIT_DIR/$1" "$KIT_DIR"/[0-9]"$1"; do [ -f "$c" ] && { ec
 kit_cmd()  { local c; c=$(kit_file "$1") && echo "./$(basename "$c")" || echo "./$1"; }
 LOG_DIR="/root/ifadeg_logs"
 mkdir -p "$LOG_DIR"
+PENDING="$LOG_DIR/.part0_pending"
+
+# ---------- precheck: run it now if there is no READY result yet ----------
+if [ ! -f "$PENDING" ]; then
+    PRE=$(kit_file precheck.sh) || { echo "1precheck.sh not found in $KIT_DIR - put all 4 kit files in one folder"; exit 1; }
+    RID="$1"
+    [ -z "$RID" ] && read -r -p "Run ID for this run (e.g. E3-R01): " RID
+    [ -z "$RID" ] && { echo "No Run ID given. Stopping."; exit 1; }
+    echo "[IFADEG] no READY precheck found - running $(basename "$PRE") $RID"
+    "$PRE" "$RID" || { echo "[IFADEG] precheck says NOT READY - fix the FAIL items above, then run again."; exit 1; }
+    echo ""
+fi
+
 # Label for file names: argument, else the one set by precheck.sh, else date_time
-RUN_ID="${1:-$(cut -d, -f6 "$LOG_DIR/.part0_pending" 2>/dev/null)}"
+RUN_ID="${1:-$(cut -d, -f6 "$PENDING" 2>/dev/null)}"
 RUN_ID="${RUN_ID:-E3_$(date +%Y%m%d_%H%M%S)}"
 LOG="$LOG_DIR/${RUN_ID}_fadtese.log"
 P0_CSV="$LOG_DIR/part0.csv"
 CSV="$LOG_DIR/part1.csv"
 SPLIT_CSV="$LOG_DIR/e3_split.csv"
-PENDING="$LOG_DIR/.part0_pending"
 SAMPLES="$LOG_DIR/.${RUN_ID}.samples"
 
 # ---------- safety checks ----------
@@ -105,6 +119,7 @@ START_EPOCH=$(date +%s); START_HMS=$(date '+%H:%M:%S')
 RX0=$(rx_bytes)
 sampler & SAMPLER_PID=$!
 trap 'kill $SAMPLER_PID 2>/dev/null' EXIT
+trap 'echo; echo "[IFADEG] interrupted - this run is NOT valid: copy the log if needed, restore the clean snapshot and redo it"; exit 130' INT
 
 echo "===== IFADEG $RUN_ID: FADTESE started $START_HMS ====="
 cd /root || exit 1
