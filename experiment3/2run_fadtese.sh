@@ -5,9 +5,10 @@
 # timestamps its output and measures from outside.
 #
 # Usage (as root):
-#   ./2run_fadtese.sh E3-R01   runs 1precheck.sh E3-R01 first if no READY precheck exists,
+#   ./2run_fadtese.sh E3-R01   runs 1precheck.sh E3-R01 first when needed (no READY result,
+#                              result older than 15 min, or made for another Run ID),
 #                              then starts FADTESE only if precheck says READY
-#   ./2run_fadtese.sh          after a READY precheck (Run ID taken from precheck)
+#   ./2run_fadtese.sh          uses a fresh READY precheck (Run ID taken from it)
 # (Run ID is recorded manually on the form; files use the label set by precheck.sh)
 #
 # Records (same definitions as ADS, Part 0 + Part 1):
@@ -55,13 +56,26 @@ LOG_DIR="/root/ifadeg_logs"
 mkdir -p "$LOG_DIR"
 PENDING="$LOG_DIR/.part0_pending"
 
-# ---------- precheck: run it now if there is no READY result yet ----------
+# ---------- precheck: run it now if there is no fresh READY result for this run ----------
+NEED_PRE=0; P_RUN=""
 if [ ! -f "$PENDING" ]; then
+    NEED_PRE=1
+else
+    IFS=',' read -r _ _ _ _ _ P_RUN P_EPOCH < "$PENDING"
+    P_AGE=$(( $(date +%s) - ${P_EPOCH:-0} ))
+    if [ "$P_AGE" -gt 900 ]; then
+        echo "[IFADEG] READY precheck is $((P_AGE/60)) min old (limit 15) - running it again"; NEED_PRE=1
+    elif [ -n "$1" ] && [ "$P_RUN" != "$1" ]; then
+        echo "[IFADEG] READY precheck was for $P_RUN - running it again for $1"; NEED_PRE=1
+    fi
+fi
+if [ "$NEED_PRE" -eq 1 ]; then
     PRE=$(kit_file precheck.sh) || { echo "1precheck.sh not found in $KIT_DIR - put all 4 kit files in one folder"; exit 1; }
-    RID="$1"
+    RID="${1:-$P_RUN}"
     [ -z "$RID" ] && read -r -p "Run ID for this run (e.g. E3-R01): " RID
     [ -z "$RID" ] && { echo "No Run ID given. Stopping."; exit 1; }
-    echo "[IFADEG] no READY precheck found - running $(basename "$PRE") $RID"
+    rm -f "$PENDING"
+    echo "[IFADEG] running $(basename "$PRE") $RID"
     "$PRE" "$RID" || { echo "[IFADEG] precheck says NOT READY - fix the FAIL items above, then run again."; exit 1; }
     echo ""
 fi
@@ -88,9 +102,6 @@ if [ ! -f "$PENDING" ]; then
     exit 1
 fi
 IFS=',' read -r P0_DATE P0_BW P0_LAT P0_LOSS P0_FREE P0_RUN P0_EPOCH < "$PENDING"
-[ -n "$1" ] && [ "$P0_RUN" != "$RUN_ID" ] && echo "[IFADEG] note: precheck was run for $P0_RUN, now running $RUN_ID"
-AGE=$(( $(date +%s) - ${P0_EPOCH:-0} ))
-[ "$AGE" -gt 900 ] && echo "[IFADEG] WARNING: Part 0 was measured $((AGE/60)) min ago - consider re-running precheck.sh"
 
 # ---------- CPU / RAM sampler (every 1 s, whole VM) - same code as ADS ----------
 sampler() {
@@ -221,6 +232,11 @@ echo "Error / log          : $ERR_LOG"
 echo "Exit code / SHA-256  : $RC / ${SHA:0:12}   (0 = script finished)"
 echo "-----------------------------------------------"
 echo "Saved: $P0_CSV, $CSV and $SPLIT_CSV"
-echo "Next:  $(kit_cmd verify_fadtese.sh)"
+if [ "$RC" -eq 0 ]; then
+    echo "Next:  $(kit_cmd verify_fadtese.sh)   then   $(kit_cmd sqoop_check.sh)"
+else
+    echo "FADTESE stopped (exit $RC). Next: $(kit_cmd verify_fadtese.sh) (records NR), skip $(kit_cmd sqoop_check.sh)."
+    echo "Check the cause in $LOG; if it is the VM or network (not FADTESE), restore the snapshot and redo this run."
+fi
 } | tee -a "$LOG"
 exit "$RC"
