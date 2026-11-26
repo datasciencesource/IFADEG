@@ -4,7 +4,7 @@
 # Same items, commands and success criteria as Instrument 1 / ADS, limited to
 # what FADTESE installs. Items outside FADTESE's scope are NA (not counted as 0).
 #
-# Usage (as root, right after run_fadtese.sh):  ./verify_fadtese.sh
+# Usage (as root, right after run_fadtese.sh, no argument):  ./3verify_fadtese.sh
 #
 # Part 1 deployment items : D1 Hadoop installed, D3 Connector/J, D6 Hadoop services started
 #                           (D2, D4, D5, D7-D10 = NA: NiFi, MySQL, phpMyAdmin are not in FADTESE)
@@ -15,13 +15,22 @@
 #
 # Output (in /root/ifadeg_logs): items.csv, part2.csv (+ Outcome update in part1.csv)
 #        /root/ifadeg_runs/<RUN_ID>_verify.txt  (summary for the form)
+#
+# Experiment 3 kit, rev 2 (2026-11-26). Run order (as root, all 4 kit files in one folder):
+#   1precheck.sh E3-Rxx (must say READY) -> 2run_fadtese.sh -> 3verify_fadtese.sh -> 4sqoop_check.sh
+#   (plain names precheck.sh, run_fadtese.sh, ... also work). Give the Run ID only to precheck.
+#   FADTESE (install_big_data_utilities.sh) is downloaded into / ; results go to /root/ifadeg_logs.
 # =====================================================================
 
 RUN_ID="${1:-$(awk -F',' 'NR>1{r=$2} END{print r}' /root/ifadeg_logs/e3_split.csv 2>/dev/null)}"   # latest run; Run ID is recorded manually
-[ -z "$RUN_ID" ] && { echo "No run found in /root/ifadeg_logs/e3_split.csv - run ./run_fadtese.sh first"; exit 1; }
+[ -z "$RUN_ID" ] && { echo "No run found in /root/ifadeg_logs/e3_split.csv - run run_fadtese.sh first"; exit 1; }
 [ "$(id -u)" -ne 0 ] && { echo "Please run as root: sudo -i"; exit 1; }
 
 LOG_DIR="/root/ifadeg_logs"; RUNS_DIR="/root/ifadeg_runs"
+KIT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Kit file by plain or numbered name (run_fadtese.sh or 2run_fadtese.sh)
+kit_file() { for c in "$KIT_DIR/$1" "$KIT_DIR"/[0-9]"$1"; do [ -f "$c" ] && { echo "$c"; return 0; }; done; return 1; }
+kit_cmd()  { local c; c=$(kit_file "$1") && echo "./$(basename "$c")" || echo "./$1"; }
 mkdir -p "$LOG_DIR" "$RUNS_DIR"
 CSV="$LOG_DIR/part1.csv"; ITEMS_CSV="$LOG_DIR/items.csv"; P2_CSV="$LOG_DIR/part2.csv"
 SPLIT_CSV="$LOG_DIR/e3_split.csv"
@@ -39,6 +48,7 @@ TODAY=$(date +%Y-%m-%d)
 STAGE_START=$(awk -F',' '$2=="FADTESE"{s=$3} END{print s}' "$CSV" 2>/dev/null)
 EXIT_CODE=$(awk -F',' -v r="$RUN_ID" '$2==r{e=$7} END{print e}' "$SPLIT_CSV" 2>/dev/null)
 [ -z "$STAGE_START" ] && echo "[IFADEG] note: no FADTESE row in part1.csv - was run_fadtese.sh used?"
+grep -q ",$RUN_ID," "$SPLIT_CSV" 2>/dev/null || echo "[IFADEG] WARNING: Run ID $RUN_ID not found in e3_split.csv - give the Run ID only to precheck and run this script with no argument"
 
 clean() { echo "$1" | tr -d '",'; }
 
@@ -151,5 +161,5 @@ echo "Part 1 items total (FADTESE scope): $P1_TOTAL / 6"
 echo "Part 2 total (FADTESE scope)      : $P2_TOTAL / 4"
 echo "Final FADTESE Outcome (2/0)       : $FINAL_OUTCOME ${OUTCOME_NOTE:+($OUTCOME_NOTE)}"
 echo "Saved: $ITEMS_CSV, $P2_CSV; summary $OUT"
-echo "Next:  ./sqoop_check.sh"
+echo "Next:  $(kit_cmd sqoop_check.sh)"
 } | tee "$OUT"
