@@ -4,7 +4,7 @@
 # The FADTESE script is run UNCHANGED (SHA-256 checked); this wrapper only
 # timestamps its output and measures from outside.
 #
-# Usage (as root, in /root, right after precheck.sh says READY):
+# Usage (as root, right after precheck.sh says READY):
 #   ./run_fadtese.sh
 # (Run ID is recorded manually on the form; files use the label set by precheck.sh)
 #
@@ -25,7 +25,17 @@
 
 [ "$(id -u)" -ne 0 ] && { echo "Please run as root: sudo -i"; exit 1; }
 
-SCRIPT="${FADTESE_SCRIPT:-/root/install_big_data_utilities.sh}"
+SCRIPT="${FADTESE_SCRIPT:-/install_big_data_utilities.sh}"
+FADTESE_URL="${FADTESE_URL:-https://raw.githubusercontent.com/datasciencesource/bash-script/main/install_big_data_utilities.sh}"
+# Download the published FADTESE script into / if it is not there yet (not timed: done before the clock starts)
+get_fadtese() {
+    [ -f "$SCRIPT" ] && return 0
+    echo "[IFADEG] downloading FADTESE script to $SCRIPT"
+    wget -q -O "$SCRIPT" "$FADTESE_URL" || { rm -f "$SCRIPT"; echo "[IFADEG] download failed: $FADTESE_URL"; return 1; }
+    head -1 "$SCRIPT" | grep -q '^#!' || { rm -f "$SCRIPT"; echo "[IFADEG] downloaded file is not a script (check the URL)"; return 1; }
+    chmod +x "$SCRIPT"
+}
+
 EXPECTED_SHA="faa5f5ed325a9a6c2f028c015d072490b1b79dc6d97426aa5fbec60011a72216"
 STAGE="FADTESE"
 LOG_DIR="/root/ifadeg_logs"
@@ -41,6 +51,7 @@ PENDING="$LOG_DIR/.part0_pending"
 SAMPLES="$LOG_DIR/.${RUN_ID}.samples"
 
 # ---------- safety checks ----------
+get_fadtese || exit 1
 [ -f "$SCRIPT" ] || { echo "FADTESE script not found: $SCRIPT"; exit 1; }
 SHA=$(sha256sum "$SCRIPT" | cut -d' ' -f1)
 if [ "$SHA" != "$EXPECTED_SHA" ]; then
@@ -163,6 +174,7 @@ echo "$(date +%Y-%m-%d),$RUN_ID,$START_HMS,$HADOOP_END,$HADOOP_S,$REST_S,$RC,${S
 {
 echo ""
 echo "----- Part 0: $RUN_ID -----"
+echo "Date                                   : $P0_DATE"
 echo "Run start / end                        : $START_HMS / $END_HMS"
 echo "Network bandwidth (Mbit/s)             : $P0_BW"
 echo "Network latency (ms) / packet loss (%) : $P0_LAT / $P0_LOSS"
@@ -180,6 +192,7 @@ echo "Outcome (2/0)        : $OUTCOME (final value is set by verify_fadtese.sh)"
 echo "Peak / Mean CPU (%)  : $PEAK_CPU / $MEAN_CPU"
 echo "Peak RAM (GB)        : $PEAK_RAM"
 echo "Error / log          : $ERR_LOG"
+echo "Exit code / SHA-256  : $RC / ${SHA:0:12}   (0 = script finished)"
 echo "-----------------------------------------------"
 echo "Saved: $P0_CSV, $CSV and $SPLIT_CSV"
 echo "Next:  ./verify_fadtese.sh"
