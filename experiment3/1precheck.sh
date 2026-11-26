@@ -2,14 +2,20 @@
 # =====================================================================
 # precheck.sh - run BEFORE each FADTESE run (Experiment 3, Instrument 3)
 # Checks that the VM is clean, is the same VM spec as Experiment 4, and
-# that FADTESE is the unchanged published script. It does not change the system.
+# that FADTESE is the unchanged published script. It only downloads FADTESE into /
+# if it is missing; it installs nothing and does not wait for apt.
 #
-# Usage (as root):  ./precheck.sh
+# Usage (as root):  ./1precheck.sh E3-R01
 # (Run ID is recorded manually on the form; an optional label can be given: ./precheck.sh E3-R01)
 # Exit code 0 = READY, 1 = NOT READY (fix the FAIL items first)
 #
 # Output: Part 0 values on screen + /root/ifadeg_logs/.part0_pending
 #         (run_fadtese.sh turns this into one row of part0.csv, same columns as ADS)
+#
+# Experiment 3 kit, rev 2 (2026-11-26). Run order (as root, all 4 kit files in one folder):
+#   1precheck.sh E3-Rxx (must say READY) -> 2run_fadtese.sh -> 3verify_fadtese.sh -> 4sqoop_check.sh
+#   (plain names precheck.sh, run_fadtese.sh, ... also work). Give the Run ID only to precheck.
+#   FADTESE (install_big_data_utilities.sh) is downloaded into / ; results go to /root/ifadeg_logs.
 # =====================================================================
 
 RUN_ID="${1:-E3_$(date +%Y%m%d_%H%M%S)}"   # label for file names; Run ID is recorded manually
@@ -25,6 +31,9 @@ get_fadtese() {
 }
 
 KIT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Kit file by plain or numbered name (run_fadtese.sh or 2run_fadtese.sh)
+kit_file() { for c in "$KIT_DIR/$1" "$KIT_DIR"/[0-9]"$1"; do [ -f "$c" ] && { echo "$c"; return 0; }; done; return 1; }
+kit_cmd()  { local c; c=$(kit_file "$1") && echo "./$(basename "$c")" || echo "./$1"; }
 LOG_DIR="/root/ifadeg_logs"
 
 # SHA-256 of the published FADTESE script.
@@ -79,13 +88,6 @@ grep -q "HADOOP_INSTALL" /root/.bashrc 2>/dev/null && bad "/root/.bashrc already
 grep -q "JAVA_HOME" /etc/environment && bad "/etc/environment already has JAVA_HOME - not a clean VM" \
                                      || ok "/etc/environment clean"
 pgrep -f "org.apache.hadoop" >/dev/null && bad "Hadoop processes already running" || ok "No Hadoop processes running"
-# Busy = apt/dpkg lock held, or a real upgrade run (not the always-running unattended-upgrade-shutdown helper)
-if fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock >/dev/null 2>&1 \
-   || pgrep -x apt-get >/dev/null || pgrep -x apt >/dev/null || pgrep -f '/usr/bin/unattended-upgrade( |$)' >/dev/null; then
-    bad "apt / unattended-upgrades is running - wait until it finishes (it would lock apt)"
-else
-    ok "apt is free (no lock holder)"
-fi
 if [ -f "$LOG_DIR/part1.csv" ] && grep -q ',FADTESE,' "$LOG_DIR/part1.csv"; then
     bad "$LOG_DIR/part1.csv already has a FADTESE row - copy the old results to the host and restore the snapshot"
 else
@@ -105,10 +107,10 @@ else
     bad "FADTESE script not found: $SCRIPT"
 fi
 for f in run_fadtese.sh verify_fadtese.sh sqoop_check.sh; do
-    if [ -f "$KIT_DIR/$f" ]; then
-        [ -x "$KIT_DIR/$f" ] && ok "Kit file present: $f" || bad "Kit file not executable: chmod +x $KIT_DIR/$f"
+    if p=$(kit_file "$f"); then
+        [ -x "$p" ] && ok "Kit file present: $(basename "$p")" || bad "Kit file not executable: chmod +x $p"
     else
-        bad "Kit file missing: $KIT_DIR/$f"
+        bad "Kit file missing: $f (or numbered name) in $KIT_DIR"
     fi
 done
 
@@ -160,8 +162,8 @@ if [ "$FAIL" -eq 0 ]; then
     # date,bandwidth,latency,loss,free_disk,run_id,measured_epoch  (read by run_fadtese.sh)
     echo "$DATE,${BW:-NA},${LAT:-NA},${LOSS:-NA},$FREE,$RUN_ID,$(date +%s)" > "$LOG_DIR/.part0_pending"
     echo " READY - start FADTESE now (Part 0 was just measured):"
-    echo "   ./run_fadtese.sh"
-    echo " Then: ./verify_fadtese.sh   and   ./sqoop_check.sh"
+    echo "   $(kit_cmd run_fadtese.sh)"
+    echo " Then: $(kit_cmd verify_fadtese.sh)   and   $(kit_cmd sqoop_check.sh)"
     exit 0
 else
     echo " NOT READY - fix the FAIL items (usually: restore the clean snapshot)."
