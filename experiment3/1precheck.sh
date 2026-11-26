@@ -36,10 +36,9 @@ kit_file() { for c in "$KIT_DIR/$1" "$KIT_DIR"/[0-9]"$1"; do [ -f "$c" ] && { ec
 kit_cmd()  { local c; c=$(kit_file "$1") && echo "./$(basename "$c")" || echo "./$1"; }
 LOG_DIR="/root/ifadeg_logs"
 
-# SHA-256 of the published FADTESE script.
-# If the GitHub copy gives a different value, run: sha256sum install_big_data_utilities.sh
-# on the official copy and paste that value here.
-EXPECTED_SHA="faa5f5ed325a9a6c2f028c015d072490b1b79dc6d97426aa5fbec60011a72216"
+# SHA-256 of the published FADTESE script: github.com/datasciencesource/bash-script,
+# main branch, last commit b86a889 (188 lines, 6.51 KB). Check on the VM: sha256sum /install_big_data_utilities.sh
+EXPECTED_SHA="b7719e30ed191593fa3ec85e7275def0df790e2ada81709951c2496f35122a55"
 
 # Expected VM spec (same VM as Experiment 4: 4 vCPU, 4 GB RAM, 64 GB disk)
 EXP_VCPU=4
