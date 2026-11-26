@@ -6,7 +6,7 @@
 # if it is missing; it installs nothing and does not wait for apt.
 #
 # Usage (as root):  ./1precheck.sh E3-R01
-# (Run ID is recorded manually on the form; an optional label can be given: ./precheck.sh E3-R01)
+# (Run ID is recorded manually on the form; an optional label can be given: ./1precheck.sh E3-R01)
 # Exit code 0 = READY, 1 = NOT READY (fix the FAIL items first)
 #
 # Output: Part 0 values on screen + /root/ifadeg_logs/.part0_pending
@@ -40,7 +40,7 @@ LOG_DIR="/root/ifadeg_logs"
 # main branch, last commit b86a889 (188 lines, 6.51 KB). Check on the VM: sha256sum /install_big_data_utilities.sh
 EXPECTED_SHA="b7719e30ed191593fa3ec85e7275def0df790e2ada81709951c2496f35122a55"
 
-# Expected VM spec (same VM as Experiment 4: 4 vCPU, 4 GB RAM, 64 GB disk)
+# Expected VM spec (same VM as Experiment 4: 4 vCPU, 4 GB RAM, disk about 68 GB)
 EXP_VCPU=4
 EXP_RAM_MIN=3.5; EXP_RAM_MAX=4.2      # GB seen by the guest for a 4 GB VM
 EXP_DISK_MIN=55; EXP_DISK_MAX=70      # GB size of / (this VM shows 68 GB)
@@ -71,7 +71,7 @@ DISK_GB=$(df -BG --output=size / | tail -1 | tr -dc '0-9')
 awk -v r="$RAM_GB" -v a="$EXP_RAM_MIN" -v b="$EXP_RAM_MAX" 'BEGIN{exit !(r>=a && r<=b)}' \
     && ok "RAM: ${RAM_GB} GB" || bad "RAM: ${RAM_GB} GB (expected about 4 GB, same as Experiment 4)"
 [ "$DISK_GB" -ge "$EXP_DISK_MIN" ] && [ "$DISK_GB" -le "$EXP_DISK_MAX" ] \
-    && ok "Disk: ${DISK_GB} GB" || bad "Disk: ${DISK_GB} GB (expected a 64 GB disk, same as Experiment 4)"
+    && ok "Disk: ${DISK_GB} GB" || bad "Disk: ${DISK_GB} GB (expected ${EXP_DISK_MIN}-${EXP_DISK_MAX} GB, same as Experiment 4)"
 
 FREE=$(df -BG / | awk 'NR==2{gsub("G","",$4); print $4}')     # same command as ADS (1hadoop.sh)
 [ "$FREE" -ge 5 ] && ok "Free disk: ${FREE} GB" || bad "Free disk: ${FREE} GB (need at least 5 GB)"
@@ -114,7 +114,7 @@ for f in run_fadtese.sh verify_fadtese.sh sqoop_check.sh; do
 done
 
 echo "4. Tools needed by FADTESE and the evaluation kit"
-for t in bash apt-get wget tar ping python3 sha256sum awk; do
+for t in bash apt-get wget tar ping bc python3 sha256sum awk; do   # bc: used by the FADTESE ADRI score
     command -v "$t" >/dev/null 2>&1 && ok "$t available" || bad "$t missing (install it in the clean snapshot)"
 done
 command -v mysql >/dev/null 2>&1 && ok "mysql client available (used only by sqoop_check.sh for the source checksum)" \
