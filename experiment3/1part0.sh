@@ -6,13 +6,13 @@
 # Run ID is entered manually on the form.
 # Run start / end time is recorded by the run step (next script).
 #
-# Usage (as root):  ./1part0.sh
-# Output: values on screen + one row in /root/ifadeg_logs/part0.csv
+# Usage (as root, in /):  ./1part0.sh
+# Output: values on screen + one row in /ifadeg_logs/part0.csv
 # =====================================================================
 
 [ "$(id -u)" -ne 0 ] && { echo "Please run as root: sudo -i"; exit 1; }
 
-LOG_DIR="/root/ifadeg_logs"
+LOG_DIR="/ifadeg_logs"
 CSV="$LOG_DIR/part0.csv"
 mkdir -p "$LOG_DIR"
 
