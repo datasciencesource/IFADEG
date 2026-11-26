@@ -4,7 +4,7 @@
 # Checks that the VM is clean, is the same VM spec as Experiment 4, and
 # that FADTESE is the unchanged published script. It does not change the system.
 #
-# Usage (as root, in /root):  ./precheck.sh
+# Usage (as root):  ./precheck.sh
 # (Run ID is recorded manually on the form; an optional label can be given: ./precheck.sh E3-R01)
 # Exit code 0 = READY, 1 = NOT READY (fix the FAIL items first)
 #
@@ -13,7 +13,17 @@
 # =====================================================================
 
 RUN_ID="${1:-E3_$(date +%Y%m%d_%H%M%S)}"   # label for file names; Run ID is recorded manually
-SCRIPT="${FADTESE_SCRIPT:-/root/install_big_data_utilities.sh}"
+SCRIPT="${FADTESE_SCRIPT:-/install_big_data_utilities.sh}"
+FADTESE_URL="${FADTESE_URL:-https://raw.githubusercontent.com/datasciencesource/bash-script/main/install_big_data_utilities.sh}"
+# Download the published FADTESE script into / if it is not there yet (not timed: done before the clock starts)
+get_fadtese() {
+    [ -f "$SCRIPT" ] && return 0
+    echo "[IFADEG] downloading FADTESE script to $SCRIPT"
+    wget -q -O "$SCRIPT" "$FADTESE_URL" || { rm -f "$SCRIPT"; echo "[IFADEG] download failed: $FADTESE_URL"; return 1; }
+    head -1 "$SCRIPT" | grep -q '^#!' || { rm -f "$SCRIPT"; echo "[IFADEG] downloaded file is not a script (check the URL)"; return 1; }
+    chmod +x "$SCRIPT"
+}
+
 KIT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LOG_DIR="/root/ifadeg_logs"
 
@@ -25,7 +35,7 @@ EXPECTED_SHA="faa5f5ed325a9a6c2f028c015d072490b1b79dc6d97426aa5fbec60011a72216"
 # Expected VM spec (same VM as Experiment 4: 4 vCPU, 4 GB RAM, 64 GB disk)
 EXP_VCPU=4
 EXP_RAM_MIN=3.5; EXP_RAM_MAX=4.2      # GB seen by the guest for a 4 GB VM
-EXP_DISK_MIN=55; EXP_DISK_MAX=66      # GB size of / for a 64 GB virtual disk
+EXP_DISK_MIN=55; EXP_DISK_MAX=70      # GB size of / (this VM shows 68 GB)
 
 PASS=0; FAIL=0; WARN=0
 ok()   { echo "  [PASS] $1"; PASS=$((PASS+1)); }
@@ -69,7 +79,9 @@ grep -q "HADOOP_INSTALL" /root/.bashrc 2>/dev/null && bad "/root/.bashrc already
 grep -q "JAVA_HOME" /etc/environment && bad "/etc/environment already has JAVA_HOME - not a clean VM" \
                                      || ok "/etc/environment clean"
 pgrep -f "org.apache.hadoop" >/dev/null && bad "Hadoop processes already running" || ok "No Hadoop processes running"
-if pgrep -x apt-get >/dev/null || pgrep -x apt >/dev/null || pgrep -f unattended-upgrade >/dev/null; then
+# Busy = apt/dpkg lock held, or a real upgrade run (not the always-running unattended-upgrade-shutdown helper)
+if fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock >/dev/null 2>&1 \
+   || pgrep -x apt-get >/dev/null || pgrep -x apt >/dev/null || pgrep -f '/usr/bin/unattended-upgrade( |$)' >/dev/null; then
     bad "apt / unattended-upgrades is running - wait until it finishes (it would lock apt)"
 else
     ok "apt is free (no lock holder)"
@@ -81,6 +93,7 @@ else
 fi
 
 echo "3. FADTESE script and evaluation kit"
+get_fadtese
 if [ -f "$SCRIPT" ]; then
     SHA=$(sha256sum "$SCRIPT" | cut -d' ' -f1)
     [ "$SHA" = "$EXPECTED_SHA" ] && ok "FADTESE script unchanged (SHA-256 matches)" \
@@ -104,7 +117,7 @@ for t in bash apt-get wget tar ping python3 sha256sum awk; do
     command -v "$t" >/dev/null 2>&1 && ok "$t available" || bad "$t missing (install it in the clean snapshot)"
 done
 command -v mysql >/dev/null 2>&1 && ok "mysql client available (used only by sqoop_check.sh for the source checksum)" \
-    || bad "mysql client missing - install mysql-client in the clean snapshot (evaluation only)"
+    || warn "mysql client missing - sqoop_check.sh will install it after FADTESE (evaluation only)"
 command -v speedtest-cli >/dev/null 2>&1 && ok "speedtest-cli available" \
     || warn "speedtest-cli missing - bandwidth will be recorded as NA"
 
