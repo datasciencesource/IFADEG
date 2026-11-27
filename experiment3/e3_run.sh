@@ -145,7 +145,7 @@ rx_bytes() {
          END { printf "%.0f", s+0 }' /proc/net/dev
 }
 
-# Sampler: every 1 s, whole VM -> "epoch cpu% ram_gb rx_bytes"
+# Sampler: every 1 s, whole VM -> "epoch(s.ms) cpu% ram_gb rx_bytes" (a sample covers the time since the one before)
 sampler() {
     read -r _ u n s i w q sq st _ < /proc/stat
     pt=$((u+n+s+i+w+q+sq+st)); pi=$((i+w))
@@ -155,17 +155,14 @@ sampler() {
         t=$((u+n+s+i+w+q+sq+st)); id=$((i+w))
         dt=$((t-pt)); di=$((id-pi)); pt=$t; pi=$id
         ram=$(awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} END{printf "%.3f",(t-a)/1048576}' /proc/meminfo)
-        [ "$dt" -gt 0 ] && echo "$(date +%s) $(awk -v dt="$dt" -v di="$di" 'BEGIN{printf "%.1f",(dt-di)*100/dt}') $ram $(rx_bytes)" >> "$SAMPLES"
+        [ "$dt" -gt 0 ] && echo "$EPOCHREALTIME $(awk -v dt="$dt" -v di="$di" 'BEGIN{printf "%.1f",(dt-di)*100/dt}') $ram $(rx_bytes)" >> "$SAMPLES"
     done
 }
 
-# Download time (s) from log lines between two epochs: apt "Fetched ... in X" + wget "100% ...=X"
-dl_time() {   # $1 = from epoch, $2 = to epoch
-    grep -E 'Fetched .* in [0-9]|100%.*=[0-9.]+[hms]' "$LOG" | while IFS= read -r l; do
-        e=$(date -d "$(echo "$l" | sed -E 's/^\[([^]]*)\].*/\1/')" +%s 2>/dev/null) || continue
-        # window [from, to): the line at "to" belongs to the next part, except at the very end of the run
-        [ "$e" -ge "$1" ] || continue
-        [ "$e" -lt "$2" ] || { [ "$2" -eq "$END_EPOCH" ] && [ "$e" -le "$2" ]; } || continue
+# Download time (s) from the log lines of one step (line range, so a step inside one second is still counted):
+#   apt "Fetched ... in X" + wget "100% ...=X"
+dl_time() {   # $1 = first line, $2 = last line of the step in $LOG
+    sed -n "${1},${2}p" "$LOG" | grep -E 'Fetched .* in [0-9]|100%.*=[0-9.]+[hms]' | while IFS= read -r l; do
         if echo "$l" | grep -q 'Fetched'; then
             echo "$l" | grep -oE ' in [0-9]+(h|min|s)( [0-9]+(min|s))?' | sed -E 's/ in //; s/min/m/g'
         else
@@ -176,16 +173,34 @@ dl_time() {   # $1 = from epoch, $2 = to epoch
           s=substr(s,RSTART+RLENGTH) }; f=1 } END{ if(f) printf "%.1f", t+0; else print "0.0" }'
 }
 
-# Data (MB), peak/mean CPU, peak RAM between two epochs (rx at the start is the first sample >= from)
-part_stats() {   # $1 = from epoch, $2 = to epoch, $3 = rx bytes at the start, $4 = rx bytes at the end
-    awk -v a="$1" -v b="$2" -v r0="$3" -v r1="$4" '$1>=a && $1<=b { c+=$2; n++; if($2>pc)pc=$2; if($3>pr)pr=$3 }
-        END{ if(n) printf "%.1f %.1f %.1f %.2f\n",(r1-r0)/1000000,pc,c/n,pr; else printf "%.1f NA NA NA\n",(r1-r0)/1000000 }' "$SAMPLES"
+# Bytes reported in the step's own log lines (MB): wget "saved [N/N]" + apt "Fetched X kB|MB|GB".
+# Used for Data when a step is shorter than 2 s: the network counter is read once per second,
+# so it cannot separate such a step from the downloads just before or after it.
+log_mb() {   # $1 = first line, $2 = last line
+    sed -n "${1},${2}p" "$LOG" | awk '
+        /saved \[[0-9]+/ { if (match($0, /saved \[[0-9]+/)) { v=substr($0, RSTART+7, RLENGTH-7); s+=v } }
+        /Fetched [0-9.,]+ [kMG]?B in/ { if (match($0, /Fetched [0-9.,]+ [kMG]?B/)) { split(substr($0,RSTART+8,RLENGTH-8), a, " ");
+              n=a[1]; gsub(",", "", n); u=a[2]; s += n * ((u=="kB")?1000:(u=="MB")?1000000:(u=="GB")?1000000000:1) } }
+        END { printf "%.1f", s/1000000 }'
 }
-rx_at() { awk -v e="$1" '$1<=e {r=$4} END{print r+0}' "$SAMPLES"; }   # last rx sample at or before epoch
+
+# The 1 s samples that cover a step (each sample covers the time since the sample before it):
+#   Data      = rx at the last sample at or before the start -> rx at the first sample at or after the end
+#               (run start / end: the counters read just before and after FADTESE)
+#   CPU / RAM = the samples after the start, up to and including the first sample at or after the end,
+#               so a step shorter than 1 s still has one sample
+part_stats() {   # $1 = start epoch (s.ms), $2 = end epoch (s.ms), $3 = rx at start (empty = from samples), $4 = rx at end (empty = from samples)
+    awk -v f="$1" -v t="$2" -v r0="$3" -v r1="$4" -v rx0="$RX0" -v rx1="$RX1" '
+        { if ($1+0 <= f+0) ra=$4
+          if (!done && $1+0 > f+0) { c+=$2; n++; if($2>pc)pc=$2; if($3>pr)pr=$3 }
+          if (!done && $1+0 >= t+0) { rb=$4; done=1 } }
+        END{ if (r0=="") r0=(ra=="")?rx0:ra; if (r1=="") r1=(rb=="")?rx1:rb
+             if(n) printf "%.1f %.1f %.1f %.2f\n",(r1-r0)/1000000,pc,c/n,pr; else printf "%.1f NA NA NA\n",(r1-r0)/1000000 }' "$SAMPLES"
+}
 
 # ---------- 2. start recording ----------
 : > "$SAMPLES"
-START_EPOCH=$(date +%s); START_HMS=$(date '+%H:%M:%S')
+START_EPOCH=$(date +%s.%3N); START_HMS=$(date '+%H:%M:%S')
 RX0=$(rx_bytes)
 sampler & SAMPLER_PID=$!
 PWFILE=/root/.ifadeg_sqoop_pw
@@ -196,12 +211,13 @@ echo "===== Recording started $START_HMS - running FADTESE (do not touch the key
 
 # ---------- 3. run FADTESE unchanged (every output line timestamped) ----------
 cd "$WORK_DIR" || exit 1
-"$SCRIPT" 2>&1 | while IFS= read -r l; do printf '[%(%Y-%m-%d %H:%M:%S)T] %s\n' -1 "$l"; done | tee "$LOG"
+# timestamp with milliseconds: [YYYY-MM-DD hh:mm:ss.mmm]
+"$SCRIPT" 2>&1 | while IFS= read -r l; do t=$EPOCHREALTIME; ms=${t#*.}; printf '[%(%Y-%m-%d %H:%M:%S)T.%s] %s\n' "${t%.*}" "${ms:0:3}" "$l"; done | tee "$LOG"
 RC=${PIPESTATUS[0]}
 
 # ---------- 4. end recording ----------
 kill "$SAMPLER_PID" 2>/dev/null; wait "$SAMPLER_PID" 2>/dev/null
-END_EPOCH=$(date +%s); END_HMS=$(date '+%H:%M:%S')
+END_EPOCH=$(date +%s.%3N); END_HMS=$(date '+%H:%M:%S')
 RX1=$(rx_bytes)
 
 # ---------- 5. split and calculate ----------
@@ -210,7 +226,7 @@ H_EPOCH=""
 NM_LINE=$(grep -niE 'starting nodemanager' "$LOG" | tail -1 | cut -d: -f1)
 if [ -n "$NM_LINE" ]; then
     NEXT=$(sed -n "$((NM_LINE+1))p" "$LOG"); [ -z "$NEXT" ] && NEXT=$(sed -n "${NM_LINE}p" "$LOG")
-    H_EPOCH=$(date -d "$(echo "$NEXT" | sed -E 's/^\[([^]]*)\].*/\1/')" +%s 2>/dev/null)
+    H_EPOCH=$(date -d "$(echo "$NEXT" | sed -E 's/^\[([^]]*)\].*/\1/')" +%s.%3N 2>/dev/null)
 fi
 
 # First error line (for Error / log), with its time
@@ -224,42 +240,47 @@ ERR_TXT=$(echo "$ERR_LINE" | sed -E 's/^\[[^]]*\] //' | cut -c1-100 | tr -d '",'
 #            Connector/J = 2 if FADTESE's own JAR check printed the JAR name (set -e: the copy succeeded),
 #                          0 if the step was reached but failed, NR if FADTESE stopped before it
 #            Total       = 2 if FADTESE finished (exit 0), 0 otherwise
-make_row() {   # $1 name, $2 from, $3 to, $4 outcome, $5 error text
-    local from=$1 to=$2 name=$3 out=$4 err=$5
-    local s_hms e_hms dur dl r0 r1 st
+make_row() {   # $1 from, $2 to (epochs s.ms), $3 name, $4 outcome, $5 error text, $6 first line, $7 last line of the step
+    local from=$1 to=$2 name=$3 out=$4 err=$5 la=$6 lb=$7
+    local s_hms e_hms dur dl data pcpu mcpu pram
     s_hms=$(date -d "@$from" '+%H:%M:%S'); e_hms=$(date -d "@$to" '+%H:%M:%S')
-    dur=$((to - from)); dl=$(dl_time "$from" "$to")
-    if [ "$from" -eq "$START_EPOCH" ]; then r0=$RX0; else r0=$(rx_at "$from"); fi
-    if [ "$to" -eq "$END_EPOCH" ]; then r1=$RX1; else r1=$(rx_at "$to"); fi
+    dur=$(awk -v a="$from" -v b="$to" 'BEGIN{printf "%.1f", b-a}')
+    dl=$(dl_time "$la" "$lb")
+    local r0="" r1=""   # run start / end use the counters read just before and after FADTESE
+    [ "$from" = "$START_EPOCH" ] && r0=$RX0
+    [ "$to" = "$END_EPOCH" ] && r1=$RX1
     read -r data pcpu mcpu pram < <(part_stats "$from" "$to" "$r0" "$r1")
+    # step shorter than 2 s: Data from the bytes wget / apt report for it (see log_mb)
+    awk -v d="$dur" 'BEGIN{exit !(d<2)}' && data=$(log_mb "$la" "$lb")
     echo "$name|$s_hms / $e_hms|$dur|$dl|$data|1|0|$out|$pcpu / $mcpu|$pram|$err"
 }
+LOG_LINES=$(wc -l < "$LOG")
 
 if [ "$RC" -eq 0 ]; then ERR_TOTAL="No error - $LOGNAME_ONLY"; else ERR_TOTAL="Failed: exit $RC${ERR_TXT:+ | $ERR_TXT} - $LOGNAME_ONLY"; fi
 
 if [ -n "$H_EPOCH" ]; then
-    ROW_H=$(make_row "$START_EPOCH" "$H_EPOCH" "Hadoop part" 2 "No error")
+    ROW_H=$(make_row "$START_EPOCH" "$H_EPOCH" "Hadoop part" 2 "No error" 1 "$NM_LINE")
 else
     # Hadoop was never started: the whole run belongs to the Hadoop part
-    ROW_H=$(make_row "$START_EPOCH" "$END_EPOCH" "Hadoop part" 0 "Failed: exit $RC${ERR_TXT:+ | $ERR_TXT}")
+    ROW_H=$(make_row "$START_EPOCH" "$END_EPOCH" "Hadoop part" 0 "Failed: exit $RC${ERR_TXT:+ | $ERR_TXT}" 1 "$LOG_LINES" 1)
 fi
 # Connector/J window: first output line that mentions mysql-connector-java (its download)
 #   -> FADTESE's own JAR check line (a line that is exactly the JAR name), or the last mention if the step failed
 CJ_FIRST=$(grep -n 'mysql-connector-java' "$LOG" | head -1 | cut -d: -f1)
 CJ_CHECK=$(grep -nE "^\[[^]]*\] ${CONNECTOR_JAR//./\\.}[[:space:]]*$" "$LOG" | head -1 | cut -d: -f1)
 CJ_LAST=${CJ_CHECK:-$(grep -n 'mysql-connector-java' "$LOG" | tail -1 | cut -d: -f1)}
-ts_of_line() { date -d "$(sed -n "${1}p" "$LOG" | sed -E 's/^\[([^]]*)\].*/\1/')" +%s 2>/dev/null; }
+ts_of_line() { date -d "$(sed -n "${1}p" "$LOG" | sed -E 's/^\[([^]]*)\].*/\1/')" +%s.%3N 2>/dev/null; }
 if [ -n "$CJ_FIRST" ]; then
     CJ_S=$(ts_of_line "$CJ_FIRST"); CJ_E=$(ts_of_line "$CJ_LAST")
     if [ -n "$CJ_CHECK" ]; then CJ_OUT=2; CJ_ERR="No error"
     else CJ_OUT=0; CJ_ERR="Failed: exit $RC${ERR_TXT:+ | $ERR_TXT}"; fi
-    ROW_C=$(make_row "$CJ_S" "$CJ_E" "Connector/J" "$CJ_OUT" "$CJ_ERR")
+    ROW_C=$(make_row "$CJ_S" "$CJ_E" "Connector/J" "$CJ_OUT" "$CJ_ERR" "$CJ_FIRST" "$CJ_LAST")
 else
     ROW_C="Connector/J|NR|NR|NR|NR|NR|NR|NR|NR|NR|Not reached (FADTESE stopped before Connector/J)"
 fi
 
 [ "$RC" -eq 0 ] && OUT_T=2 || OUT_T=0
-ROW_T=$(make_row "$START_EPOCH" "$END_EPOCH" "Total" "$OUT_T" "$ERR_TOTAL")
+ROW_T=$(make_row "$START_EPOCH" "$END_EPOCH" "Total" "$OUT_T" "$ERR_TOTAL" 1 "$LOG_LINES")
 
 # ---------- save ----------
 [ -f "$CSV" ] || echo "date,run_start,part,start_end,duration_s,download_time_s,data_downloaded_mb,attempts,recovery_time_s,outcome,peak_mean_cpu_pct,peak_ram_gb,error_log,exit_code,sha256_12" > "$CSV"
