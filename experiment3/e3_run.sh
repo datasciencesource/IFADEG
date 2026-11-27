@@ -444,7 +444,7 @@ fi
 PRE_OK=1
 [ -n "$SKIP_WF" ] && { PRE_OK=0; PRE_MSG="FADTESE deployment incomplete (D1/D3/D6 not all 2)"; }
 [ "$PRE_OK" -eq 1 ] && [ ! -x "$SQOOP_HOME/bin/sqoop" ] && { PRE_OK=0; PRE_MSG="Sqoop not installed (FADTESE did not finish)"; }
-if [ "$PRE_OK" -eq 1 ] && ! hdfs dfs -ls / >/dev/null 2>&1; then PRE_OK=0; PRE_MSG="HDFS not reachable"; fi
+if [ "$PRE_OK" -eq 1 ] && ! timeout 60 hdfs dfs -ls / >/dev/null 2>&1; then PRE_OK=0; PRE_MSG="HDFS not reachable"; fi
 if [ "$PRE_OK" -eq 1 ]; then
     COLS=$(myq "SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='$REMOTE_DB' AND TABLE_NAME='$REMOTE_TABLE' ORDER BY ORDINAL_POSITION")
     [ -z "$COLS" ] && { PRE_OK=0; PRE_MSG="cannot read $REMOTE_DB.$REMOTE_TABLE with the mysql client (check host/user/password)"; }
@@ -535,7 +535,7 @@ echo "$(date +%F),$START_HMS,${RUN_ID:-manual},$WF_S,$THROUGHPUT,$P1_TOTAL,$P2_T
 {
 echo ""
 echo "===== Summary for Instrument 3 (run started $START_HMS${RUN_ID:+, $RUN_ID}) ====="
-echo "Workflow execution time / throughput: ${WF_S} s; ${THROUGHPUT} records/s"
+echo "Workflow execution time (s) and throughput (records/s): $WF_START / $WF_END = ${WF_S} s; ${THROUGHPUT} records/s"
 echo "Part totals (FADTESE scope): Part 1 items $P1_TOTAL / 6; Part 2 $P2_TOTAL / 4; Part 3 $P3_TOTAL / 8"
 echo "Final FADTESE Outcome (2/0): $FINAL   (2 = FADTESE finished and D1, D3, D6 passed)"
 echo "FADTESE exit code / SHA-256 (first 12): $RC / $SHA ($SHA_CHECK)"
