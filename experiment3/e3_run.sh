@@ -14,17 +14,31 @@
 #   Summary                  workflow time / throughput, part totals, final FADTESE Outcome, SHA-256
 #
 # FADTESE source: https://github.com/datasciencesource/bash-script/blob/main/install_big_data_utilities.sh
-# Run ID is entered manually on the form.
+# Run ID is entered manually on the form (optional argument: ./e3_run.sh E3-R01).
 #
-# Usage (as root, in /, on a freshly restored clean snapshot):  ./e3_run.sh
+# Usage (as root, in /, on a freshly restored clean snapshot):  ./e3_run.sh [RUN_ID]
 #   It asks for the remote MySQL password first (not stored), then runs about 12 minutes
 #   without input. Or give it in advance: REMOTE_PW='...' ./e3_run.sh
 # Output (in /ifadeg_logs): part0.csv, part1.csv, items.csv, part2.csv, part3.csv, e3_workflow.csv, summary.csv,
-#                           <label>_sqoop.log,
+#                           <date_time>_sqoop.log,
 #                           fadtese_<date_time>.log (full FADTESE output, timestamped)
+#
+# Scoring: 2 = passed; 1 = passed after a 30 s wait (Part 2 only); 0 = reached but failed;
+#          NR = not reached because FADTESE stopped before that step (counts as 0); NA = not in FADTESE scope
 # =====================================================================
 
 [ "$(id -u)" -ne 0 ] && { echo "Please run as root: sudo -i"; exit 1; }
+
+RUN_ID="${1:-}"   # optional; the Run ID is normally written on the form
+
+# SHA-256 (first 12) of the published FADTESE. Fill in once from a verified download;
+# when set, a run with a different script stops before anything is installed.
+EXPECTED_SHA="${EXPECTED_SHA:-}"
+
+# Clean-snapshot guard: FADTESE must start on a VM where nothing of it is installed yet
+for d in /usr/local/hadoop /usr/local/sqoop; do
+    [ -e "$d" ] && { echo "$d already exists - this is not a clean snapshot. Restore it and run again."; exit 1; }
+done
 
 LOG_DIR="/ifadeg_logs"
 mkdir -p "$LOG_DIR"
@@ -109,8 +123,19 @@ if ! head -1 "$SCRIPT" | grep -q '^#!'; then
     rm -f "$SCRIPT"; echo "Downloaded file is not a script - check the link above."; exit 1
 fi
 chmod +x "$SCRIPT"
-SHA=$(sha256sum "$SCRIPT" | cut -c1-12)
-echo "Saved to $SCRIPT ($(wc -l < "$SCRIPT") lines, SHA-256 $SHA)"
+SHA_FULL=$(sha256sum "$SCRIPT" | cut -d' ' -f1)
+SHA=${SHA_FULL:0:12}
+echo "Saved to $SCRIPT ($(wc -l < "$SCRIPT") lines, SHA-256 $SHA_FULL)"
+# The published FADTESE must be run unchanged
+if [ -n "$EXPECTED_SHA" ]; then
+    if [ "$SHA" != "${EXPECTED_SHA:0:12}" ]; then
+        echo "FADTESE SHA-256 $SHA does not match the published version ${EXPECTED_SHA:0:12} - run NOT valid, stopped before installing."
+        exit 1
+    fi
+    echo "SHA-256 matches the published FADTESE ($SHA)."
+else
+    echo "WARNING: EXPECTED_SHA is not set - SHA $SHA is recorded but not checked."
+fi
 
 # ---------- helpers ----------
 # Bytes received on all network interfaces except lo
@@ -163,7 +188,9 @@ rx_at() { awk -v e="$1" '$1<=e {r=$4} END{print r+0}' "$SAMPLES"; }   # last rx 
 START_EPOCH=$(date +%s); START_HMS=$(date '+%H:%M:%S')
 RX0=$(rx_bytes)
 sampler & SAMPLER_PID=$!
-trap 'kill $SAMPLER_PID 2>/dev/null; rm -f "$SAMPLES"' EXIT
+PWFILE=/root/.ifadeg_sqoop_pw
+cleanup() { kill "$SAMPLER_PID" 2>/dev/null; rm -f "$SAMPLES" "$PWFILE"; rm -rf /tmp/ifadeg_sqoop_out /tmp/ifadeg_sqoop_bin; }
+trap cleanup EXIT
 trap 'echo; echo "Interrupted - this run is NOT valid: restore the clean snapshot and redo it."; exit 130' INT
 echo "===== Recording started $START_HMS - running FADTESE (do not touch the keyboard) ====="
 
@@ -194,7 +221,8 @@ ERR_TXT=$(echo "$ERR_LINE" | sed -E 's/^\[[^]]*\] //' | cut -c1-100 | tr -d '",'
 
 # Row values: Start/End, Duration, Download time, Data, Attempts, Recovery, Outcome, CPU, RAM, Error/log
 #   Outcome: Hadoop part = 2 if Hadoop was started, 0 if FADTESE stopped before that
-#            Connector/J = 2 if its JAR check line appears and FADTESE finished, 0 if not, NR if not reached
+#            Connector/J = 2 if FADTESE's own JAR check printed the JAR name (set -e: the copy succeeded),
+#                          0 if the step was reached but failed, NR if FADTESE stopped before it
 #            Total       = 2 if FADTESE finished (exit 0), 0 otherwise
 make_row() {   # $1 name, $2 from, $3 to, $4 outcome, $5 error text
     local from=$1 to=$2 name=$3 out=$4 err=$5
@@ -215,13 +243,15 @@ else
     # Hadoop was never started: the whole run belongs to the Hadoop part
     ROW_H=$(make_row "$START_EPOCH" "$END_EPOCH" "Hadoop part" 0 "Failed: exit $RC${ERR_TXT:+ | $ERR_TXT}")
 fi
-# Connector/J window: first -> last output line that mentions mysql-connector-java
+# Connector/J window: first output line that mentions mysql-connector-java (its download)
+#   -> FADTESE's own JAR check line (a line that is exactly the JAR name), or the last mention if the step failed
 CJ_FIRST=$(grep -n 'mysql-connector-java' "$LOG" | head -1 | cut -d: -f1)
-CJ_LAST=$(grep -n 'mysql-connector-java' "$LOG" | tail -1 | cut -d: -f1)
+CJ_CHECK=$(grep -nE "^\[[^]]*\] ${CONNECTOR_JAR//./\\.}[[:space:]]*$" "$LOG" | head -1 | cut -d: -f1)
+CJ_LAST=${CJ_CHECK:-$(grep -n 'mysql-connector-java' "$LOG" | tail -1 | cut -d: -f1)}
 ts_of_line() { date -d "$(sed -n "${1}p" "$LOG" | sed -E 's/^\[([^]]*)\].*/\1/')" +%s 2>/dev/null; }
 if [ -n "$CJ_FIRST" ]; then
     CJ_S=$(ts_of_line "$CJ_FIRST"); CJ_E=$(ts_of_line "$CJ_LAST")
-    if grep -q 'mysql-connector-java-5.1.34-bin.jar' "$LOG" && [ "$RC" -eq 0 ]; then CJ_OUT=2; CJ_ERR="No error"
+    if [ -n "$CJ_CHECK" ]; then CJ_OUT=2; CJ_ERR="No error"
     else CJ_OUT=0; CJ_ERR="Failed: exit $RC${ERR_TXT:+ | $ERR_TXT}"; fi
     ROW_C=$(make_row "$CJ_S" "$CJ_E" "Connector/J" "$CJ_OUT" "$CJ_ERR")
 else
@@ -293,11 +323,18 @@ for k in 1 2 3 4 5 6 7; do
 done
 if [ -z "$MISSING" ]; then D6=2; D6_EV="all 5 daemons running"; else D6=0; D6_EV="missing: $MISSING"; fi
 
-# ---------- NR: FADTESE stopped before it got there ----------
-if [ -n "$EXIT_CODE" ] && [ "$EXIT_CODE" != "0" ]; then
-    [ "$D1" = "0" ] && { D1=NR; D1_EV="not reached (FADTESE stopped, exit $EXIT_CODE)"; }
-    [ "$D3" = "0" ] && { D3=NR; D3_EV="not reached (FADTESE stopped, exit $EXIT_CODE)"; }
-    [ "$D6" = "0" ] && { D6=NR; D6_EV="not reached (FADTESE stopped, exit $EXIT_CODE)"; }
+# ---------- NR: only if FADTESE stopped before that step (judged from its log, not the exit code) ----------
+#   Hadoop part reached = the "starting nodemanager" line appeared (H_EPOCH set)
+#   Connector/J reached = a line mentioning mysql-connector-java appeared (CJ_FIRST set)
+#   A step that was reached but failed keeps 0.
+HADOOP_REACHED=""; [ -n "$H_EPOCH" ] && HADOOP_REACHED=1
+CJ_REACHED="";     [ -n "$CJ_FIRST" ] && CJ_REACHED=1
+if [ -z "$HADOOP_REACHED" ]; then
+    [ "$D1" = "0" ] && { D1=NR; D1_EV="not reached (FADTESE stopped before the Hadoop part finished, exit $EXIT_CODE)"; }
+    [ "$D6" = "0" ] && { D6=NR; D6_EV="not reached (FADTESE stopped before the Hadoop part finished, exit $EXIT_CODE)"; }
+fi
+if [ -z "$CJ_REACHED" ]; then
+    [ "$D3" = "0" ] && { D3=NR; D3_EV="not reached (FADTESE stopped before the Connector/J step, exit $EXIT_CODE)"; }
 fi
 
 num() { case "$1" in 2|1|0) echo "$1" ;; *) echo 0 ;; esac; }   # NR counts as 0
@@ -326,27 +363,34 @@ echo "Saved: $ITEMS_CSV"
 # PART 2: C1, C2
 # ############################################################
 echo ""
+# (timeout: if the NameNode is down, hdfs commands keep retrying the connection)
 check_c1() {
-    REPORT=$(hdfs dfsadmin -report 2>/dev/null)
+    REPORT=$(timeout 60 hdfs dfsadmin -report 2>/dev/null)
     LIVE=$(echo "$REPORT" | grep -oE 'Live datanodes \([0-9]+\)' | grep -oE '[0-9]+')
-    SAFE=$(hdfs dfsadmin -safemode get 2>/dev/null | grep -oE 'OFF|ON' | head -1)
+    SAFE=$(timeout 60 hdfs dfsadmin -safemode get 2>/dev/null | grep -oE 'OFF|ON' | head -1)
     C1_EV="Live DataNodes=${LIVE:-0}; safe mode=${SAFE:-unknown}"
     [ "${LIVE:-0}" -ge 1 ] && [ "$SAFE" = "OFF" ]
 }
 check_c2() {
-    C2_OUT=$(hdfs dfs -mkdir -p /big_data 2>/dev/null && echo ok | hdfs dfs -put -f - /big_data/_check.txt 2>/dev/null \
-             && hdfs dfs -cat /big_data/_check.txt 2>/dev/null)
+    C2_OUT=$(timeout 60 hdfs dfs -mkdir -p /big_data 2>/dev/null && echo ok | timeout 60 hdfs dfs -put -f - /big_data/_check.txt 2>/dev/null \
+             && timeout 60 hdfs dfs -cat /big_data/_check.txt 2>/dev/null)
     if [ "$C2_OUT" = "ok" ]; then C2_EV="Prints ok"; else C2_EV="read/write failed"; fi
     [ "$C2_OUT" = "ok" ]
 }
 
-# Reached only if Hadoop is installed and its NameNode and DataNode are running
-if [ -x /usr/local/hadoop/bin/hdfs ] && jps 2>/dev/null | grep -qw NameNode && jps 2>/dev/null | grep -qw DataNode; then
-    if check_c1; then C1=2; else sleep 30; if check_c1; then C1=1; C1_EV="$C1_EV (passed after 30 s)"; else C1=0; fi; fi
-    if check_c2; then C2=2; else sleep 30; if check_c2; then C2=1; C2_EV="$C2_EV (passed after 30 s)"; else C2=0; fi; fi
+# NR only if FADTESE stopped before the Hadoop part finished;
+# if Hadoop was reached but the NameNode or DataNode is not running, C1 and C2 score 0
+if [ -n "$HADOOP_REACHED" ]; then
+    if jps 2>/dev/null | grep -qw NameNode && jps 2>/dev/null | grep -qw DataNode; then
+        if check_c1; then C1=2; else sleep 30; if check_c1; then C1=1; C1_EV="$C1_EV (passed after 30 s)"; else C1=0; fi; fi
+        if check_c2; then C2=2; else sleep 30; if check_c2; then C2=1; C2_EV="$C2_EV (passed after 30 s)"; else C2=0; fi; fi
+    else
+        C1=0; C1_EV="Hadoop reached but NameNode/DataNode not running"
+        C2=0; C2_EV="Hadoop reached but NameNode/DataNode not running"
+    fi
 else
-    C1=NR; C1_EV="not reached (Hadoop not installed or not running)"
-    C2=NR; C2_EV="not reached (Hadoop not installed or not running)"
+    C1=NR; C1_EV="not reached (FADTESE stopped before the Hadoop part finished)"
+    C2=NR; C2_EV="not reached (FADTESE stopped before the Hadoop part finished)"
 fi
 
 P2_TOTAL=$(( $(num "$C1") + $(num "$C2") ))
@@ -372,17 +416,15 @@ echo "Saved: $P2_CSV"
 # ############################################################
 export SQOOP_HOME=/usr/local/sqoop
 export PATH="$PATH:$SQOOP_HOME/bin"
-RUN_ID="$TS"
 P3_CSV="$LOG_DIR/part3.csv"; WF_CSV="$LOG_DIR/e3_workflow.csv"
-SQLOG="$LOG_DIR/${RUN_ID}_sqoop.log"
+SQLOG="$LOG_DIR/${TS}_sqoop.log"
 res() { case "$1" in 2|1) echo PASS ;; NR) echo NR ;; NA) echo NA ;; *) echo FAIL ;; esac; }
 echo ""
 # Workflow only if FADTESE deployed what it needs (Hadoop, Connector/J, daemons)
 SKIP_WF=""; { [ "$D1" = 2 ] && [ "$D3" = 2 ] && [ "$D6" = 2 ]; } || SKIP_WF=1
 [ -n "$SKIP_WF" ] && echo "[IFADEG] Part 3 skipped: FADTESE deployment incomplete (D1/D3/D6 not all 2) - W items recorded as NR"
-PWFILE=/root/.ifadeg_sqoop_pw
-printf '%s' "$REMOTE_PW" > "$PWFILE"; chmod 400 "$PWFILE"
-trap 'rm -f "$PWFILE" "$SAMPLES"; rm -rf /tmp/ifadeg_sqoop_out /tmp/ifadeg_sqoop_bin' EXIT
+# Password file for Sqoop (removed by cleanup on exit)
+[ -z "$SKIP_WF" ] && { ( umask 077; printf '%s' "$REMOTE_PW" > "$PWFILE" ); chmod 400 "$PWFILE"; }
 myq() { MYSQL_PWD="$REMOTE_PW" mysql -h "$REMOTE_HOST" -P "$REMOTE_PORT" -u "$REMOTE_USER" -N -B -r -e "$1" 2>>"$SQLOG"; }
 for it in W1 W2 W6 W7; do eval "${it}=NR; ${it}_EV='not reached'"; done
 WF_START=NA; WF_END=NA; WF_S=NA; THROUGHPUT=NA; SRC_COUNT=NA; TGT_COUNT=NA
@@ -455,16 +497,16 @@ fi
 
 
 # ---------- save Part 3 ----------
-[ -f "$P3_CSV" ] || echo "date,run_id,item,result,score,evidence" > "$P3_CSV"
+[ -f "$P3_CSV" ] || echo "date,run_start,item,result,score,evidence" > "$P3_CSV"
 for it in W1 W2 W6 W7; do
     ev_var="${it}_EV"
-    echo "$TODAY,$RUN_ID,$it,$(res "${!it}"),${!it},\"$(echo "${!ev_var}" | tr -d '",')\"" >> "$P3_CSV"
+    echo "$TODAY,$START_HMS,$it,$(res "${!it}"),${!it},\"$(echo "${!ev_var}" | tr -d '",')\"" >> "$P3_CSV"
 done
 for it in W3 W4 W5 W8; do
-    echo "$TODAY,$RUN_ID,$it,NA,NA,\"NiFi-specific - not in FADTESE scope\"" >> "$P3_CSV"
+    echo "$TODAY,$START_HMS,$it,NA,NA,\"NiFi-specific - not in FADTESE scope\"" >> "$P3_CSV"
 done
-[ -f "$WF_CSV" ] || echo "date,run_id,tool,start,end,duration_s,records,throughput_rps" > "$WF_CSV"
-echo "$TODAY,$RUN_ID,sqoop,$WF_START,$WF_END,$WF_S,${RETRIEVED:-NA},$THROUGHPUT" >> "$WF_CSV"
+[ -f "$WF_CSV" ] || echo "date,run_start,tool,start,end,duration_s,records,throughput_rps" > "$WF_CSV"
+echo "$TODAY,$START_HMS,sqoop,$WF_START,$WF_END,$WF_S,${RETRIEVED:-NA},$THROUGHPUT" >> "$WF_CSV"
 P3_TOTAL=$(( $(num "$W1") + $(num "$W2") + $(num "$W6") + $(num "$W7") ))
 
 {
@@ -487,15 +529,16 @@ echo "Saved: $P3_CSV, $WF_CSV; Sqoop log $SQLOG"
 # ############################################################
 # Final FADTESE Outcome: 2 only if FADTESE exited 0 AND D1, D3 and D6 passed
 if [ "$RC" -eq 0 ] && [ "$D1" = 2 ] && [ "$D3" = 2 ] && [ "$D6" = 2 ]; then FINAL=2; else FINAL=0; fi
-[ -f "$SUM_CSV" ] || echo "date,run_start,workflow_s,throughput_rps,part1_items_of_6,part2_of_4,part3_of_8,final_outcome,exit_code,sha256_12" > "$SUM_CSV"
-echo "$(date +%F),$START_HMS,$WF_S,$THROUGHPUT,$P1_TOTAL,$P2_TOTAL,$P3_TOTAL,$FINAL,$RC,$SHA" >> "$SUM_CSV"
+if [ -z "$EXPECTED_SHA" ]; then SHA_CHECK="not checked"; else SHA_CHECK="matches"; fi
+[ -f "$SUM_CSV" ] || echo "date,run_start,run_id,workflow_s,throughput_rps,part1_items_of_6,part2_of_4,part3_of_8,final_outcome,exit_code,sha256_12,sha_check" > "$SUM_CSV"
+echo "$(date +%F),$START_HMS,${RUN_ID:-manual},$WF_S,$THROUGHPUT,$P1_TOTAL,$P2_TOTAL,$P3_TOTAL,$FINAL,$RC,$SHA,$SHA_CHECK" >> "$SUM_CSV"
 {
 echo ""
-echo "===== Summary for Instrument 3 (run started $START_HMS) ====="
+echo "===== Summary for Instrument 3 (run started $START_HMS${RUN_ID:+, $RUN_ID}) ====="
 echo "Workflow execution time / throughput: ${WF_S} s; ${THROUGHPUT} records/s"
 echo "Part totals (FADTESE scope): Part 1 items $P1_TOTAL / 6; Part 2 $P2_TOTAL / 4; Part 3 $P3_TOTAL / 8"
 echo "Final FADTESE Outcome (2/0): $FINAL   (2 = FADTESE finished and D1, D3, D6 passed)"
-echo "FADTESE SHA-256 (first 12) : $SHA"
-echo "Run ID: write it on the form. Copy /ifadeg_logs to the host before restoring the snapshot."
+echo "FADTESE exit code / SHA-256 (first 12): $RC / $SHA ($SHA_CHECK)"
+echo "Run ID: write it on the form. Copy /ifadeg_logs to the host (folder named after the Run ID) before restoring the snapshot."
 } | tee -a "$LOG"
 exit "$RC"
